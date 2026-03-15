@@ -7,7 +7,7 @@ from gsplat import rasterization
 import cv2
 import math
 from datetime import datetime
-from utils.visualizer import LiveOptimizationVisualizer
+from scripts.utils.main_visualizer import LiveOptimizationVisualizer
 from moge.model.v2 import MoGeModel
 import open3d as o3d
 from PIL import Image

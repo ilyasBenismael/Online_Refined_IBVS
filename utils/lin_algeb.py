@@ -89,12 +89,17 @@ class LinAlgeb :
     # ------------- Getting homog matrix from R and t --------------
 
     @staticmethod
-    def get_homog_matrix(R: Sequence[Sequence[float]], t: Sequence[float]) -> np.ndarray:
+    def get_homog_frm_rt(R: Sequence[Sequence[float]], t: Sequence[float]) -> np.ndarray:
         """Build 4x4 homogeneous transformation matrix from R and t."""
         T = np.eye(4, dtype=float)
         T[:3, :3] = R
         T[:3, 3] = t
         return T
+
+
+    def get_homog_frm_vect(pose_vector) :
+        R,t = LinAlgeb.make_rot_trans(*pose_vector)
+        return LinAlgeb.get_homog_matrix(R,t)
 
 
 
@@ -136,7 +141,7 @@ class LinAlgeb :
 
 
     @staticmethod
-    def print_mat_condition_number(A):
+    def get_mat_condition_number(A):
 
         A = np.asarray(A)
 
@@ -179,7 +184,8 @@ class LinAlgeb :
         else:
             meaning = "Almost linearly dependent"
 
-        print(f"{meaning}, {cond_number}")
+        #print(f"{meaning}, {cond_number}")
+        return cond_number
 
 
     @staticmethod
@@ -190,3 +196,15 @@ class LinAlgeb :
     def inverse_sigmoid(y):
         # y must be in (0, 1)
         return np.log(y / (1 - y))
+    
+
+
+    
+    @staticmethod
+    def pose_distance(T1, T2):
+        """
+        Compute Euclidean distance between two homogeneous pose matrices.
+        """
+        p1 = T1[:3, 3]  # translation of first pose
+        p2 = T2[:3, 3]  # translation of second pose
+        return np.linalg.norm(p2 - p1)

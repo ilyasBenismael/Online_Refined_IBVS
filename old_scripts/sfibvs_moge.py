@@ -8,7 +8,7 @@ import os
 from plyfile import PlyData, PlyElement
 from PIL import Image
 from datetime import datetime
-from utils.visualizer import LiveOptimizationVisualizer
+from scripts.utils.main_visualizer import LiveOptimizationVisualizer
 import torch
 from typing import Tuple, Sequence, List, Union
 from moge.model.v2 import MoGeModel

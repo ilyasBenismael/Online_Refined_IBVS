@@ -23,7 +23,7 @@ import math
 import os
 from PIL import Image
 from datetime import datetime
-from utils.visualizer import LiveOptimizationVisualizer
+from scripts.utils.main_visualizer import LiveOptimizationVisualizer
 import torch
 from moge.model.v2 import MoGeModel
 import pycolmap

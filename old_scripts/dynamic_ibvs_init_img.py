@@ -9,7 +9,7 @@ import math
 from plyfile import PlyData, PlyElement
 from PIL import Image
 from datetime import datetime
-from utils.visualizer import LiveOptimizationVisualizer
+from scripts.utils.main_visualizer import LiveOptimizationVisualizer
 import torch
 from typing import Tuple, Sequence, List, Union
 from moge.model.v2 import MoGeModel
@@ -23,19 +23,23 @@ from modules.xfeat import XFeat
 
 
 
+# load GS1, choose an image from dataset get a des image with moge, choose many initial and desimgs, moge on init and find it on des, save estim_des
+# start ibvs curr img = init img, gsplat on curr X realimg,  curr GS1 x 
+# choose initial pose, from dataset, 
+
 
 
 
 #ibvs params
-dt = 0.4
+dt = 0.04
 lamda = 0.1
 
 #paths
-mesh_path = "meshes/house.glb"
+mesh_path = "meshes/office2.glb"
 o3d_frames_path = "frames/o3d"
 gs_frames_path = "frames/gs"
-moge_points_save_path = "moge_points/house_0.ply"
-gs_save_path = "gs_scenes/init_gs_house.ply"
+moge_points_save_path = "moge_points/office2_0.ply"
+gs_save_path = "gs_scenes/init_gs_office2.ply"
 
 
 # robot camera
@@ -938,10 +942,11 @@ def remove_edge_features(coords, mask, nbr_features, radius=2):
 def main() :
 
     # Fixed Vars :
-    lambda_gain = 0.09
+    lambda_gain = 0.2
     dt = 0.1
     all_nbr_ftrs = 100
     nbr_features = 10
+    
     # Scale the mesh to meters, for office_2 nearly 1 meter corresp to 4 units
     scale = (1/4) 
 
@@ -950,9 +955,9 @@ def main() :
     mesh = load_mesh(mesh_path, scale, False)
 
     # Visualize and choose a real initial pose || use the saved one
-    init_pose = get_cam_pose_from_mesh_view(mesh)
-    np.save("init_pose_2.npy", init_pose)
-    init_pose = np.load("init_pose_2.npy")
+    """init_pose = get_cam_pose_from_mesh_view(mesh)
+    np.save("numpy_data/init_pose.npy", init_pose)"""
+    init_pose = np.load("numpy_data/init_pose.npy")
 
     # Move init_pose to origin
     mesh.transform(np.linalg.inv(init_pose))
@@ -961,25 +966,25 @@ def main() :
 
     # Take initial mesh pic || load the saved one
     init_mesh_img, init_depth = render_mesh_pic(mesh, init_pose)
-    save_img(init_mesh_img, "x", o3d_frames_path)
-    init_mesh_img = load_np_img(f"{o3d_frames_path}/x.png")
+    save_img(init_mesh_img, 0, o3d_frames_path)
+    init_mesh_img = load_np_img(f"{o3d_frames_path}/0.png")
     plot_img(init_mesh_img, "init_img")
 
 
     # Apply moge on the init real img || load ready mogepoints
     moge_points_o3d, moge_points, moge_colors = get_moge_points(init_mesh_img) # moge scene dist from cam is not accurate
-    np.save("moge_points_2.npy", moge_points)
-    np.save("moge_colors_2.npy", moge_colors)
-    moge_points = np.load("moge_points_2.npy")
-    moge_colors = np.load("moge_colors_2.npy")
+    np.save("numpy_data/moge_points.npy", moge_points)
+    np.save("numpy_data/moge_colors.npy", moge_colors)
+    moge_points = np.load("numpy_data/moge_points.npy")
+    moge_colors = np.load("numpy_data/moge_colors.npy")
     moge_points_o3d = o3d.io.read_point_cloud(moge_points_save_path)
     
     # Choosing a des_pose from moge points 
-    des_gs_pose = get_cam_pose_from_mesh_view(moge_points_o3d)
+    #des_gs_pose = get_cam_pose_from_mesh_view(mesh)
+    des_gs_pose = init_pose @ get_homog([-0.5, -0.8, 1, 0, 0, 0])
 
     # Visualize all
     visualize_scene([moge_points_o3d, mesh])  
-
  
     # Init gaussians from moge_points & Rendering gs initial pose img 
     gaussians_list = init_gaussians_from_points(moge_points, moge_colors, gs_save_path)    
@@ -990,11 +995,12 @@ def main() :
     # Render des_gs_img and des_mesh_img
     des_gs_img, _ = render_gs_pic(*gaussians_list, T=des_gs_pose, K=intrins_gs, W=CAM_W, H=CAM_H)
     des_mesh_img, _ = render_mesh_pic(mesh, des_gs_pose)
-    plot_2_imgs(init_mesh_img, init_gs_img, "init_mesh_img",  "init_gs_img")
+    des_gs_img = des_mesh_img
+    """plot_2_imgs(init_mesh_img, init_gs_img, "init_mesh_img",  "init_gs_img")
     plot_2_imgs(des_mesh_img, des_gs_img, "des_mesh_img",  "des_gs_img")
     plot_2_imgs(init_gs_img, des_gs_img, "init_gs_img",  "des_gs_img")
     save_img(des_mesh_img, "desired", o3d_frames_path)
-    save_img(des_gs_img, "desired", gs_frames_path)
+    save_img(des_gs_img, "desired", gs_frames_path)"""
 
 
     # Matching features with Xfeat between the init and des
@@ -1008,7 +1014,7 @@ def main() :
     # Drawing all matches
     init_all_mtch_gs_img = draw_matches(matches_init, matches_des, init_gs_img, des_gs_img)
 
-    # get depth_edge mask and plot
+    # Get depth_edge mask and plot
     edge_mask = utils3d.np.depth_map_edge(init_gs_depth, rtol=0.008) # shape H*W
     plot_2_imgs(init_gs_depth, edge_mask, "gs_depth", "depth_edges")
 
@@ -1050,10 +1056,10 @@ def main() :
             cur_mtch_gs_img = draw_matches(matches_cur, matches_des, cur_gs_img, des_gs_img)
             save_img(cur_mtch_gs_img, f"cur_mtch_gs_img_{i}", gs_frames_path)
 
+            # 2 - Get cur and des features
             Ss_star = get_Ss_from_uv(matches_des)
             Ss_cur = get_Ss_from_uv(matches_cur)
             Ss_Z_cur = get_feats_depth(matches_cur, cur_gs_depth_map)
-
 
 
             # 3 - Get the error
@@ -1073,7 +1079,7 @@ def main() :
 
             # 5 - Choose lambda and calculate V with control law
             if norm_of_error < 0.25 :
-                lambda_gain = 0.05
+                lambda_gain = 0.2
             if norm_of_error < 0.0001 :
                 break        
             V = - lambda_gain * (L_psinv @ errors)  

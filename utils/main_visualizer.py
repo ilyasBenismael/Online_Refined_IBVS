@@ -1,9 +1,13 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import matplotlib.patches as patches
 
 
-class LiveOptimizationVisualizer:
+
+
+
+
+
+class MainVisualizer:
 
     def __init__(self, initial_img):
         self.initial_img = initial_img
@@ -109,10 +113,10 @@ class LiveOptimizationVisualizer:
         for ax in (self.ax_img_cur, self.ax_img_des, self.ax_img_real, self.ax_img_init):
             ax.axis('off')
 
-        self.ax_img_cur.set_title("Current")
-        self.ax_img_des.set_title("Desired")
-        self.ax_img_real.set_title("Real")
-        self.ax_img_init.set_title("Initial")
+        self.ax_img_cur.set_title("Current frame")
+        self.ax_img_des.set_title("Estimated desired img")
+        self.ax_img_real.set_title("Real desired img")
+        self.ax_img_init.set_title("Initial frame")
 
         self.img_cur_plot = None
         self.img_des_plot = None
@@ -172,7 +176,76 @@ class LiveOptimizationVisualizer:
 
 
 
+    # -------------------------------------------------
+    # Draw a coordinate frame from homogeneous matrix
+    # -------------------------------------------------
+    def draw_frame(ax, T, length=0.2):
+        origin = T[:3, 3]
+        R = T[:3, :3]
+
+        ax.quiver(*origin, *R[:, 0], color='r', length=length)
+        ax.quiver(*origin, *R[:, 1], color='g', length=length)
+        ax.quiver(*origin, *R[:, 2], color='b', length=length)
 
 
+    # -------------------------------------------------
+    # Initialize visualizer
+    # -------------------------------------------------
+    def init_traject_visualizer(initial_T, desired_T):
+        plt.ion()
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+
+        trajectory = []
+
+        # Compute center and range to fit both frames
+        p0 = initial_T[:3, 3]
+        p1 = desired_T[:3, 3]
+        center = (p0 + p1) / 2.0
+        span = np.linalg.norm(p1 - p0)
+        margin = max(span * 0.8, 1.0)   # minimum margin of 1.0
+
+        ax.set_xlim(center[0] - margin, center[0] + margin)
+        ax.set_ylim(center[1] - margin, center[1] + margin)
+        ax.set_zlim(center[2] - margin, center[2] + margin)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+
+        # Draw initial and desired frames once — they never move
+        MainVisualizer.draw_frame(ax, initial_T, length=margin * 0.15)
+        MainVisualizer.draw_frame(ax, desired_T, length=margin * 0.15)
+
+        return fig, ax, trajectory
 
 
+    # -------------------------------------------------
+    # Update visualizer each iteration
+    # -------------------------------------------------
+    def update_traject_visualizer(ax, initial_T, desired_T, current_T, trajectory):
+
+        ax.cla()    
+        # store trajectory
+        trajectory.append(current_T[:3, 3].copy())
+        traj = np.array(trajectory) 
+        # draw frames
+        MainVisualizer.draw_frame(ax, initial_T)
+        MainVisualizer.draw_frame(ax, desired_T)
+        MainVisualizer.draw_frame(ax, current_T)    
+        # draw trajectory
+        if len(traj) > 1:
+            ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'r')    
+        # center scene around both initial and desired frames
+        p0 = initial_T[:3, 3]
+        p1 = desired_T[:3, 3]
+        center = (p0 + p1) / 2.0
+        span = np.linalg.norm(p1 - p0)
+        margin = max(span * 0.8, 1.0)   
+        ax.set_xlim(center[0] - margin, center[0] + margin)
+        ax.set_ylim(center[1] - margin, center[1] + margin)
+        ax.set_zlim(center[2] - margin, center[2] + margin)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")  
+        plt.pause(0.001)

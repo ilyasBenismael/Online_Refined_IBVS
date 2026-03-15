@@ -9,7 +9,7 @@ import math
 from plyfile import PlyData, PlyElement
 from PIL import Image
 from datetime import datetime
-from utils.visualizer import LiveOptimizationVisualizer
+from scripts.utils.main_visualizer import LiveOptimizationVisualizer
 import torch
 from typing import Tuple, Sequence, List, Union
 from moge.model.v2 import MoGeModel
@@ -20,8 +20,6 @@ import utils3d
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(os.path.join(project_root, "accelerated_features"))
 from modules.xfeat import XFeat 
-
-
 
 
 
@@ -74,8 +72,6 @@ intrins2_o3d = o3d.camera.PinholeCameraIntrinsic(
 )
 
 np.set_printoptions(precision=2, suppress=False)
-
-
 
 
 
@@ -363,8 +359,6 @@ def compute_grayscale_difference(img1, img2, normalize=True):
         diff = diff[:, :, np.newaxis]
     
     return diff
-
-
 
 
 
@@ -938,7 +932,7 @@ def remove_edge_features(coords, mask, nbr_features, radius=2):
 def main() :
 
     # Fixed Vars :
-    lambda_gain = 0.2
+    lambda_gain = 0.3
     dt = 0.1
     all_nbr_ftrs = 100
     nbr_features = 10
@@ -951,8 +945,8 @@ def main() :
 
     # Visualize and choose a real initial pose || use the saved one
     """init_pose = get_cam_pose_from_mesh_view(mesh)
-    np.save("init_pose.npy", init_pose)"""
-    init_pose = np.load("init_pose.npy")
+    np.save("numpy_data/init_pose.npy", init_pose)"""
+    init_pose = np.load("numpy_data/init_pose.npy")
 
     # Move init_pose to origin
     mesh.transform(np.linalg.inv(init_pose))
@@ -968,16 +962,21 @@ def main() :
 
     # Apply moge on the init real img || load ready mogepoints
     """moge_points_o3d, moge_points, moge_colors = get_moge_points(init_mesh_img) # moge scene dist from cam is not accurate
-    np.save("moge_points.npy", moge_points)
-    np.save("moge_colors.npy", moge_colors)"""
-    moge_points = np.load("moge_points.npy")
-    moge_colors = np.load("moge_colors.npy")
+    np.save("numpy_data/moge_points.npy", moge_points)
+    np.save("numpy_data/moge_colors.npy", moge_colors)"""
+    moge_points = np.load("numpy_data/moge_points.npy")
+    moge_colors = np.load("numpy_data/moge_colors.npy")
+    print("mogepoint_shape", moge_points.shape)
+    print("mogecolors_shape", moge_colors.shape)
+    print("min_ponits", moge_points.min())
+    print("max_points", moge_points.max())
+    print("min_col", moge_colors.min())
+    print("max_col", moge_colors.max())
+
     moge_points_o3d = o3d.io.read_point_cloud(moge_points_save_path)
     
     # Choosing a des_pose from moge points 
-    des_gs_pose = init_pose @ get_homog([1, 1, 0, 0, 0, 0])
-    #des_gs_pose = get_cam_pose_from_mesh_view(mesh)
-
+    des_gs_pose = get_cam_pose_from_mesh_view(moge_points_o3d)
 
     # Visualize all
     visualize_scene([moge_points_o3d, mesh])  
@@ -987,12 +986,17 @@ def main() :
     gaussians_list = init_gaussians_from_points(moge_points, moge_colors, gs_save_path)    
     init_gs_img, init_gs_depth = render_gs_pic(*gaussians_list, T=init_pose, K=intrins_gs, W=CAM_W, H=CAM_H)
     plot_2_imgs(init_gs_img, init_gs_depth, "init_gs_img", "init_gs_depth")
-    
+
+
+    #check init depth map, get contours from it
+    edge_mask = utils3d.np.depth_map_edge(init_gs_depth, rtol=0.008) # shape H*W
+    plot_2_imgs(init_gs_depth, edge_mask, "gs_depth", "depth_edges")
+
 
     # Render des_gs_img and des_mesh_img
     des_gs_img, _ = render_gs_pic(*gaussians_list, T=des_gs_pose, K=intrins_gs, W=CAM_W, H=CAM_H)
     des_mesh_img, _ = render_mesh_pic(mesh, des_gs_pose)
-    des_gs_img = des_mesh_img
+    #des_gs_img = des_mesh_img
     """plot_2_imgs(init_mesh_img, init_gs_img, "init_mesh_img",  "init_gs_img")
     plot_2_imgs(des_mesh_img, des_gs_img, "des_mesh_img",  "des_gs_img")
     plot_2_imgs(init_gs_img, des_gs_img, "init_gs_img",  "des_gs_img")
@@ -1003,19 +1007,15 @@ def main() :
     # Matching features with Xfeat between the init and des
     xfeat = XFeat()
     all_matches_init, all_matches_des = xfeat.match_xfeat(init_gs_img, des_gs_img)
-    
-    # Pick first "all_nbr_ftrs" elemnts & turn them to int
+    # Keep only nbr_features matches (u,v) nd turn them to int
     matches_init = (all_matches_init[:all_nbr_ftrs]).astype(int)
     matches_des = (all_matches_des[:all_nbr_ftrs]).astype(int)
+    print(init_gs_img.shape, "initgs - mask", edge_mask.shape)
 
-    # Drawing all matches
+    # check matches uv and get the mask, 
+
+    # Drawing matches
     init_all_mtch_gs_img = draw_matches(matches_init, matches_des, init_gs_img, des_gs_img)
-
-    # Get depth_edge mask and plot
-    edge_mask = utils3d.np.depth_map_edge(init_gs_depth, rtol=0.008) # shape H*W
-    plot_2_imgs(init_gs_depth, edge_mask, "gs_depth", "depth_edges")
-
-    # Keep "nbr_ftrs" that doesn't belong to the edges
     valid_indices = remove_edge_features(matches_init, edge_mask, nbr_features)
     matches_init = matches_init[valid_indices]
     matches_des = matches_des[valid_indices]
@@ -1025,9 +1025,29 @@ def main() :
     save_img(init_mtch_gs_img, "mtch_gs_img_1", o3d_frames_path)
     plot_img(init_mtch_gs_img, "mtch_gs_img_1")
 
+
+    # Calculate 3d_coords from the matches of the init_pic which we got its depthmap (initial 3dpoints to use), give depth = 1K for very far ones
+    feats_Z = get_feats_depth(matches_init, init_gs_depth)
+    points_3d_matches_wf = get_3d_from_uv(matches_init, feats_Z) # this ofc give points in cam frame, but since init cam is wf then it's points_wf (should be kept fxd)
+    points_o3d_wf = turn_points_to_o3d(points_3d_matches_wf)
+    visualize_scene([points_o3d_wf, moge_points_o3d])
+
+
+    # just for test i will take points_3d_matches_wf repro them to des_gs_img (get the uv list), and drawmatches (this repro uvlists, and matches_des uv lists)
+    points_3d_matches_cf = LinAlgeb.transform_points_to_cam(points_3d_matches_wf, des_gs_pose)
+    Ss_des_repro_3d = get_Ss_from_points(points_3d_matches_cf)
+    uv_des_repro_3d = get_uv_from_Ss(Ss_des_repro_3d).astype(int)
+    repro_vs_matches_des_img = draw_matches(matches_des, uv_des_repro_3d, des_gs_img, des_gs_img)
+    plot_img(repro_vs_matches_des_img, "repro_vs_matches_des_img")
+
     # Get s* from matches
     Ss_star = get_Ss_from_uv(matches_des)
 
+
+    
+
+    """# Getting random n points from moge points
+    all_candidate_points = get_random_points_frm_moge(moge_points, num_samples=250)"""
 
     # Starting IBVS loop
     cur_gs_pose = init_pose
@@ -1039,24 +1059,20 @@ def main() :
             cur_gs_img, cur_gs_depth_map = render_gs_pic(*gaussians_list, T=cur_gs_pose, K=intrins_gs, W=CAM_W, H=CAM_H)
             cur_mesh_img, _ = render_mesh_pic(mesh, cur_gs_pose)
         
-            # Apply X-feat
-            all_matches_cur, all_matches_des = xfeat.match_xfeat(cur_gs_img, des_gs_img)
-            # Pick first "all_nbr_ftrs" elemnts & turn them to int
-            matches_cur = (all_matches_cur[:all_nbr_ftrs]).astype(int)
-            matches_des = (all_matches_des[:all_nbr_ftrs]).astype(int)
-            # Get depth_edge mask and plot
-            edge_mask = utils3d.np.depth_map_edge(cur_gs_depth_map, rtol=0.008) # shape H*W
-            # Keep "nbr_ftrs" that doesn't belong to the edges
-            valid_indices = remove_edge_features(matches_cur, edge_mask, nbr_features)
-            matches_cur = matches_cur[valid_indices]
-            matches_des = matches_des[valid_indices]
-            cur_mtch_gs_img = draw_matches(matches_cur, matches_des, cur_gs_img, des_gs_img)
-            save_img(cur_mtch_gs_img, f"cur_mtch_gs_img_{i}", gs_frames_path)
-
-            # 2 - Get cur and des features
-            Ss_star = get_Ss_from_uv(matches_des)
-            Ss_cur = get_Ss_from_uv(matches_cur)
-            Ss_Z_cur = get_feats_depth(matches_cur, cur_gs_depth_map)
+            # 2 - Reproject the 3d points to ss nd uv 
+            points_3d_matches_cf = LinAlgeb.transform_points_to_cam(points_3d_matches_wf, cur_gs_pose) # turn to cam frame
+            Ss_cur = get_Ss_from_points(points_3d_matches_cf)
+            uv_cur = get_uv_from_Ss(Ss_cur).astype(int)
+            #print("the points : ", points_3d_matches_cf)
+            # get feats depth in camframe
+            #Ss_Z_cur = get_feats_depth(uv_cur, cur_gs_depth_map)
+            #print(Ss_Z_cur)
+            Ss_Z_cur = [np.array([p[2]]) for p in points_3d_matches_cf]
+            
+            
+            # draw the matches and save
+            cur_gs_img_mtchs = draw_matches(uv_cur, matches_des, cur_gs_img, des_gs_img)
+            save_img(cur_gs_img_mtchs, i, gs_frames_path)
 
 
             # 3 - Get the error
@@ -1076,15 +1092,72 @@ def main() :
 
             # 5 - Choose lambda and calculate V with control law
             if norm_of_error < 0.25 :
-                lambda_gain = 0.2
+                lambda_gain = 0.1
             if norm_of_error < 0.0001 :
                 break        
             V = - lambda_gain * (L_psinv @ errors)  
            
             # 6 - Update cur_cam_pose and update visualization
             cur_gs_pose = update_cam_pose(cur_gs_pose, V, dt)
-            matp_vis.update(i, cur_mtch_gs_img, cur_gs_img, cur_mesh_img, des_gs_img, V, norm_of_error)
-   
+            matp_vis.update(i, cur_gs_img_mtchs, cur_gs_img, cur_mesh_img, des_gs_img, V, norm_of_error)
+            
+
+            "this one below is for known despose, so we randomly choose 3d points fimter them and reproject on both cur and des"
+            """# ok now we got the initial 3d points we will keep them for the rest of the work, we have their yv in des, we woll get their ss_sat
+
+            # 1 - Get first n valid elmnts(in front of both cams) frm candidates and optio visualize
+            valid_points_wf = filter_valid_points(all_candidate_points, init_pose, des_gs_pose, nbr_features)
+
+            # 2 - get points in cur and des cam and their ss features
+            valid_points_cf = LinAlgeb.transform_points_to_cam(valid_points_wf, des_gs_pose)
+            Ss_star = get_Ss_from_points(valid_points_cf)
+            pxls_star = get_uv_from_Ss(Ss_star)
+            valid_points_cf = LinAlgeb.transform_points_to_cam(valid_points_wf, cur_gs_pose)
+            Ss = get_Ss_from_points(valid_points_cf)
+            pxls = get_uv_from_Ss(Ss)
+
+            # 3 - Rendering current img, nd get depth exprssd in camera frame with cam frame units 
+            cur_gs_img, cur_gs_depth_map = render_gs_pic(*gaussians_list, T=cur_gs_pose, K=intrins_gs, W=CAM_W, H=CAM_H)
+            gray_cur_gs_img = 0.299 * cur_gs_img[:, :, 0] + 0.587 * cur_gs_img[:, :, 1] + 0.114 * cur_gs_img[:, :, 2]
+            cur_gs_img_mtchs, des_gs_img_mtchs = draw_matches(cur_gs_img, des_gs_img, pxls, pxls_star)
+            save_img(cur_gs_img_mtchs,i, gs_frames_path)
+
+            # Render frm same pose the mesh pic
+            cur_mesh_img, _ = render_mesh_pic(mesh, cur_gs_pose)
+            
+            # 4 - Get corresp uvs and their depth in meters
+            cur_feats_uv = get_uv_from_Ss(Ss)
+            Ss_Z = get_feats_depth(cur_feats_uv, cur_gs_depth_map)
+
+            # 5 - Getting list of errors nd reshaping it
+            errors = getting_errors(Ss, Ss_star) 
+            errors = np.asarray(errors, dtype=float).reshape(-1)
+
+            # 6 - Print the norm of the error and get the diff of imgs
+            norm_of_error = np.linalg.norm(errors) 
+            current_diff_img = compute_grayscale_difference(gray_cur_gs_img, gray_des_gs_img)
+            print(f"error {i} :", norm_of_error)
+            
+            # 7 - Get the intr matrix nd its pseudo_inv 
+            L = get_interaction_matrix(nbr_features, Ss, Ss_Z, 1)
+            LinAlgeb.print_mat_condition_number(L)
+            L_psinv = get_inter_mat_pseudo_inverse(L)
+
+
+            # 8 - Control law
+            if norm_of_error < 0.25 :
+                lambda_gain = 0.1
+            if norm_of_error < 0.0001 :
+                break        
+            V = - lambda_gain * (L_psinv @ errors)  
+           
+            # 9 - Apply the velocity for dt and update cur_cam_pose and update visualization
+            cur_gs_pose = update_cam_pose(cur_gs_pose, V, dt)
+            matp_vis.update(i, current_diff_img, cur_gs_img, cur_mesh_img, des_gs_img, V, norm_of_error)
+
+            # 10 - Updating the valid points (probably we will return same old first valid ones )
+            valid_points_wf = filter_valid_points(all_candidate_points, cur_gs_pose, des_gs_pose, nbr_features)"""
+
     
     except KeyboardInterrupt:
             print("\nCtrl+C detected, exiting loop cleanly.")

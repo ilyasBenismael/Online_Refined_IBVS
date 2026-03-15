@@ -9,7 +9,7 @@ from typing import Tuple, Sequence, List, Union
 import cv2
 import math
 from datetime import datetime
-from utils.visualizer import LiveOptimizationVisualizer
+from scripts.utils.main_visualizer import LiveOptimizationVisualizer
 import open3d as o3d
 
 

@@ -1,7 +1,9 @@
 import os
 import sys
+import pycolmap
 import open3d as o3d
 import numpy as np
+import shutil
 from utils.lin_algeb import LinAlgeb
 import cv2
 import matplotlib.pyplot as plt
@@ -9,7 +11,7 @@ import math
 from plyfile import PlyData, PlyElement
 from PIL import Image
 from datetime import datetime
-from utils.visualizer import LiveOptimizationVisualizer
+from scripts.utils.main_visualizer import LiveOptimizationVisualizer
 import torch
 from typing import Tuple, Sequence, List, Union
 from moge.model.v2 import MoGeModel
@@ -26,16 +28,14 @@ from modules.xfeat import XFeat
 
 
 
-#ibvs params
-dt = 0.4
-lamda = 0.1
+
 
 #paths
 mesh_path = "meshes/office2.glb"
 o3d_frames_path = "frames/o3d"
-gs_frames_path = "frames/gs"
+gs_frames_path = "frames/gs2"
 moge_points_save_path = "moge_points/office2_0.ply"
-gs_save_path = "gs_scenes/init_gs_office2.ply"
+gs_save_path = "gs_scenes/init_gs_office2"
 
 
 # robot camera
@@ -99,13 +99,12 @@ def visualize_scene(scene_compos) :
 
 
 
-def get_cam_pose_from_mesh_view(mesh):
+def get_cam_pose_from_mesh_view(mesh, msg):
 
     vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name="Choose ur pose", width=800, height=800)
+    vis.create_window(window_name=msg, width=800, height=800)
     vis.add_geometry(mesh)
     vis.get_render_option().mesh_show_back_face = True
-    print("choose ur pose and close window")
     
     vis.run()
     
@@ -173,9 +172,7 @@ def get_moge_points(img, threshold=0.01):
     #check the edges (big depth diffs) and add it to the mask area to remove
     edge_mask = utils3d.np.depth_map_edge(depth, rtol=threshold)
     mask_cleaned = mask & (~edge_mask)
-
-   
-    
+       
     # get colors frm img and flatten all (colors, points, masks)
     colors = img.astype(np.float64)
     colors_flat = colors.reshape(-1, 3)
@@ -192,7 +189,7 @@ def get_moge_points(img, threshold=0.01):
     o3d.io.write_point_cloud(moge_points_save_path, o3d_points)
 
     # Return FULL arrays (H, W, 3) for indexing by pixel coordinates
-    return o3d_points, final_points, final_colors  
+    return o3d_points, final_points, final_colors, mask_cleaned
 
 
 
@@ -534,17 +531,6 @@ def get_Ss_from_points(points_in_cam: List[Sequence[float]]) -> List[List[float]
 
 
 
-"""
-def filter_valid_points(points_list, min_points=3):
-    valid = [np.array(p) for p in points_list 
-             if np.isfinite(p).all() and (len(p) < 3 or p[2] > 0)]
-    
-    if len(valid) < min_points:
-        raise ValueError(f"Only {len(valid)}/{len(points_list)} valid points (need {min_points})")
-    
-    return valid
-
-"""
 
 
 def filter_valid_points(candidate_points, cur_pose, des_pose, nbr):
@@ -619,6 +605,95 @@ def draw_matches(cur_img, des_img, pts1, pts2):
 
 
 
+
+def load_gaussians_from_ply(path, device="cuda"):
+
+
+    C0 = 0.28209479177387814  # SH Y00 normalization constant
+
+    ply = PlyData.read(path)["vertex"]
+    N = ply.count
+    print(f"\nLoaded {N} vertices from {path}")
+
+    # ---------------------------------------------------
+    # Means
+    # ---------------------------------------------------
+    means = torch.stack([
+        torch.from_numpy(ply["x"]),
+        torch.from_numpy(ply["y"]),
+        torch.from_numpy(ply["z"]),
+    ], dim=1).float().to(device)
+
+    # ---------------------------------------------------
+    # Scales (log → real)
+    # ---------------------------------------------------
+    scales_log = torch.stack([
+        torch.from_numpy(ply["scale_0"]),
+        torch.from_numpy(ply["scale_1"]),
+        torch.from_numpy(ply["scale_2"]),
+    ], dim=1).float().to(device)
+    scales = torch.exp(scales_log)
+
+    # ---------------------------------------------------
+    # Rotation (normalize quaternion)
+    # ---------------------------------------------------
+    quats = torch.stack([
+        torch.from_numpy(ply["rot_0"]),
+        torch.from_numpy(ply["rot_1"]),
+        torch.from_numpy(ply["rot_2"]),
+        torch.from_numpy(ply["rot_3"]),
+    ], dim=1).float().to(device)
+    quats = quats / torch.norm(quats, dim=1, keepdim=True)
+
+    # ---------------------------------------------------
+    # Opacity (inverse sigmoid → alpha)
+    # ---------------------------------------------------
+    opacity_param = torch.from_numpy(ply["opacity"]).float().to(device)
+    opacities = torch.sigmoid(opacity_param)
+
+    # ---------------------------------------------------
+    # SH coefficients reconstruction
+    # ---------------------------------------------------
+    ply_data = ply.data
+
+    # DC band (stored as SH coefficient)
+    f_dc = torch.stack([
+        torch.from_numpy(ply["f_dc_0"]),
+        torch.from_numpy(ply["f_dc_1"]),
+        torch.from_numpy(ply["f_dc_2"]),
+    ], dim=1).float()  # (N,3)
+
+    # Sort rest keys numerically
+    rest_keys = sorted(
+        [k for k in ply_data.dtype.names if k.startswith("f_rest_")],
+        key=lambda x: int(x.split("_")[-1])
+    )
+
+    f_rest_raw = torch.stack(
+        [torch.from_numpy(ply_data[k]) for k in rest_keys],
+        dim=1
+    ).float()  # (N,45)
+
+    f_rest = f_rest_raw.view(N, -1, 3)  # (N,15,3)
+
+    # Concatenate to full SH tensor (N,16,3)
+    sh = torch.cat([f_dc.unsqueeze(1), f_rest], dim=1)
+
+    # ---------------------------------------------------
+    # Convert DC SH back to RGB
+    # ---------------------------------------------------
+    rgb = sh[:, 0, :] * C0 + 0.5
+    rgb = torch.clamp(rgb, 0.0, 1.0).to(device)
+
+
+    return means, quats, scales, opacities, rgb
+
+
+
+
+
+
+
 def init_gaussians_from_points(
     xyz,
     rgb,
@@ -628,7 +703,6 @@ def init_gaussians_from_points(
     sh_degree=2,
     device="cuda",
 ):
-
 
     # Flatten inputs
     xyz = xyz.reshape(-1, 3)
@@ -647,12 +721,11 @@ def init_gaussians_from_points(
     num_sh = (sh_degree + 1) ** 2
 
     #______ init opacity
-    # Ok in gs we have the opacity the value we optimize and which we use inside a sigmoid to turn to 0-1, gsplat use the 0-1 one (for render), ply idk wht it stores
-    #as i see that gsplate takes the sigmoid function, the one i should give as input, and keep it for  
+    # we optimize a free opacity number but we render its sigmoid(always in 0-1), in plywe save the optimized number (inverse_sigmoid)
     opacity_logit = LinAlgeb.inverse_sigmoid(alpha)
 
     #______ init opacity
-    # when optimizing the scale we do exp(scale) so it is always positive, but ply wants the log value (optimized one) and the gsplat want the exp one (render one)
+    # we optimize free scale numbers but render (exp(scale) - always positive), what gsplat needs (ply save log number, the optimized one)
     scale_log = np.log(scale)
 
 
@@ -733,23 +806,23 @@ def render_gs_pic(means, quats, scales, opacities, sh, T, K, W, H):
     T = get_gs_viewmat(T)
 
     image, alpha, meta = rasterization(
-        means=means,
-        quats=quats,
-        scales=scales,
-        opacities=opacities,
-        colors=sh,
-        viewmats=T,
-        Ks=K,
-        width=W,
-        height=H,
-        sh_degree=2,
-        rasterize_mode="antialiased",
-        render_mode="RGB+ED",
-    )
+    means=means,
+    quats=quats,
+    scales=scales,
+    opacities=opacities,
+    colors=sh,
+    viewmats=T,
+    Ks=K,
+    width=W,
+    height=H,
+    sh_degree=2,
+    rasterize_mode="antialiased",
+    render_mode="RGB+ED",
+)
 
     img   = image[0, ..., :-1].detach().cpu().numpy() 
     depth = image[0, ..., -1].detach().cpu().numpy() 
-
+        
     return img, depth
 
 
@@ -890,7 +963,311 @@ def remove_edge_features(coords, mask, nbr_features, radius=2):
 
 
 
+def rotmat_to_quaternion_hamilton(R):
+    """
+    Convert 3x3 rotation matrix to Hamilton quaternion (qw, qx, qy, qz).
 
+    Hamilton convention:
+        q = w + xi + yj + zk
+    Order in COLMAP:
+        (qw, qx, qy, qz)
+    """
+
+    q = np.empty(4)
+    trace = np.trace(R)
+
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        q[0] = 0.25 / s
+        q[1] = (R[2,1] - R[1,2]) * s
+        q[2] = (R[0,2] - R[2,0]) * s
+        q[3] = (R[1,0] - R[0,1]) * s
+    else:
+        if R[0,0] > R[1,1] and R[0,0] > R[2,2]:
+            s = 2.0 * np.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
+            q[0] = (R[2,1] - R[1,2]) / s
+            q[1] = 0.25 * s
+            q[2] = (R[0,1] + R[1,0]) / s
+            q[3] = (R[0,2] + R[2,0]) / s
+        elif R[1,1] > R[2,2]:
+            s = 2.0 * np.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
+            q[0] = (R[0,2] - R[2,0]) / s
+            q[1] = (R[0,1] + R[1,0]) / s
+            q[2] = 0.25 * s
+            q[3] = (R[1,2] + R[2,1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
+            q[0] = (R[1,0] - R[0,1]) / s
+            q[1] = (R[0,2] + R[2,0]) / s
+            q[2] = (R[1,2] + R[2,1]) / s
+            q[3] = 0.25 * s
+
+    q /= np.linalg.norm(q)
+    return q
+
+
+
+
+
+    """ this function takees a list of image_names and a list of poses (with corresponding indices) and the 3d point cloud correspond only 
+    to the first image and pose in the list, we first use the mask to keep just valid 3dpoints and get their corresponding uvs in the image_1, 
+    ofc i have one camera shared with all images, but we go through all images : inversing them first getting t and R (turn to hamilton) (tvec nd qvec)
+    give for image id the indexe in list+1(starting from 1)..., qvec and tvec, and cam_id of my only cam and name from image_names,
+    and the second line only the first image has the corresponding points, but next cams have no 2d points blank second line """
+
+
+def write_colmap_data(
+    xyz_flat,
+    rgb_flat,
+    mask_2d,
+    poses,            # list of poses
+    image_names,      # list of image names
+    sparse_path,
+    width,
+    height,
+    f,
+    cx,
+    cy
+):
+
+    os.makedirs(sparse_path, exist_ok=True)
+
+    # ---------------------------------------------------
+    # 1 — UVs from mask (ONLY for first image)
+    # ---------------------------------------------------
+    ys, xs = np.where(mask_2d)
+
+    assert xyz_flat.shape[0] == xs.shape[0]
+    assert rgb_flat.shape[0] == xs.shape[0]
+
+    N = xyz_flat.shape[0]
+    uvs = np.stack([xs.astype(float), ys.astype(float)], axis=1)
+
+    # ---------------------------------------------------
+    # 2 — cameras.txt (single shared camera)
+    # ---------------------------------------------------
+    with open(os.path.join(sparse_path, "cameras.txt"), "w") as f_cam:
+        f_cam.write("# Camera list\n")
+        f_cam.write("# CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
+        f_cam.write("1 PINHOLE {} {} {} {} {} {}\n".format(
+            width, height, f, f, cx, cy
+        ))
+
+    # ---------------------------------------------------
+    # 3 — images.txt (multiple images)
+    # ---------------------------------------------------
+    with open(os.path.join(sparse_path, "images.txt"), "w") as f_img:
+        f_img.write("# Image list\n")
+        f_img.write("# IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
+        f_img.write("# POINTS2D[] as (X, Y, POINT3D_ID)\n")
+
+        for idx, (pose, name) in enumerate(zip(poses, image_names)):
+            image_id = idx + 1
+
+            w2c = np.linalg.inv(pose)
+            R = w2c[:3, :3]
+            t = w2c[:3, 3]
+            qvec = rotmat_to_quaternion_hamilton(R)
+
+            # First line (pose)
+            f_img.write(
+                f"{image_id} {qvec[0]} {qvec[1]} {qvec[2]} {qvec[3]} "
+                f"{t[0]} {t[1]} {t[2]} 1 {name}\n"
+            )
+
+            # Second line
+            if image_id == 1:
+                entries = [
+                    f"{uvs[i][0]} {uvs[i][1]} {i+1}"
+                    for i in range(N)
+                ]
+                f_img.write(" ".join(entries))
+            f_img.write("\n")
+
+    # ---------------------------------------------------
+    # 4 — points3D.txt
+    # ---------------------------------------------------
+    with open(os.path.join(sparse_path, "points3D.txt"), "w") as f_pts:
+        f_pts.write("# 3D point list\n")
+        f_pts.write("# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[]\n")
+
+        for i in range(N):
+            pid = i + 1
+            x, y, z = xyz_flat[i]
+            r, g, b = rgb_flat[i]
+
+            r = int(np.clip(r * 255.0, 0, 255))
+            g = int(np.clip(g * 255.0, 0, 255))
+            b = int(np.clip(b * 255.0, 0, 255))
+
+            # Only observed in image 1
+            f_pts.write(
+                f"{pid} {x} {y} {z} "
+                f"{r} {g} {b} "
+                f"0.0 1 {i}\n"
+            )
+
+
+
+
+
+def bring_plys_frm_gs_output(input_folder, output_folder):
+    os.makedirs(output_folder, exist_ok=True)
+
+    for folder_name in os.listdir(input_folder):
+        folder_path = os.path.join(input_folder, folder_name)
+        # Check valid iteration folder
+        if os.path.isdir(folder_path) and folder_name.startswith("iteration_"):
+            ply_path = os.path.join(folder_path, "point_cloud.ply")
+            if os.path.isfile(ply_path):
+                # Extract i from "iteration_i"
+                try:
+                    iteration_number = folder_name.split("_")[-1]
+                    new_filename = f"{iteration_number}.ply"
+                    destination_path = os.path.join(output_folder, new_filename)
+                    shutil.copy2(ply_path, destination_path)
+                except Exception as e:
+                    print(f"Error processing {folder_name}: {e}")
+            else:
+                print(f"No point_cloud.ply found in {folder_path}")
+
+
+
+
+
+def render_plys_and_save(
+    ply_folder,
+    output_folder,
+    init_pose,
+    des_gs_pose,
+    intrins_gs,
+    CAM_W,
+    CAM_H
+):
+    os.makedirs(os.path.join(output_folder, "init"), exist_ok=True)
+    os.makedirs(os.path.join(output_folder, "des"), exist_ok=True)
+
+    ply_files = sorted(
+        [f for f in os.listdir(ply_folder) if f.endswith(".ply")],
+        key=lambda x: int(os.path.splitext(x)[0])
+    )
+
+    for f in ply_files:
+        i = os.path.splitext(f)[0]
+        ply_path = os.path.join(ply_folder, f)
+
+        means, quats, scales, opacities, sh = load_gaussians_from_ply(ply_path)
+
+        img, _ = render_gs_pic(
+            means, quats, scales, opacities, sh,
+            init_pose, intrins_gs, CAM_W, CAM_H
+        )
+        save_img(img, f"{i}_init", os.path.join(output_folder, "init"))
+
+        img, _ = render_gs_pic(
+            means, quats, scales, opacities, sh,
+            des_gs_pose, intrins_gs, CAM_W, CAM_H
+        )
+        save_img(img, f"{i}_des", os.path.join(output_folder, "des"))
+
+
+
+
+
+
+def write_colmap_data(
+    xyz_flat,
+    rgb_flat,
+    mask_2d,
+    poses,
+    image_names,
+    sparse_path,
+    width,
+    height,
+    f,
+    cx,
+    cy
+):
+    os.makedirs(sparse_path, exist_ok=True)
+
+    ys, xs = np.where(mask_2d)
+    N = xyz_flat.shape[0]
+    uvs = np.stack([xs.astype(float), ys.astype(float)], axis=1)
+
+    n_imgs = len(poses)
+
+    # ---------------- cameras.txt ----------------
+    with open(os.path.join(sparse_path, "cameras.txt"), "w") as f_cam:
+        f_cam.write("1 PINHOLE {} {} {} {} {} {}\n".format(
+            width, height, f, f, cx, cy
+        ))
+
+    # ---------------- images.txt ----------------
+    with open(os.path.join(sparse_path, "images.txt"), "w") as f_img:
+
+        for idx, (pose, name) in enumerate(zip(poses, image_names)):
+            image_id = idx + 1
+
+            w2c = np.linalg.inv(pose)
+            R = w2c[:3, :3]
+            t = w2c[:3, 3]
+            qvec = rotmat_to_quaternion_hamilton(R)
+
+            # Pose line
+            f_img.write(
+                f"{image_id} {qvec[0]} {qvec[1]} {qvec[2]} {qvec[3]} "
+                f"{t[0]} {t[1]} {t[2]} 1 {name}\n"
+            )
+
+            # Same 2D points for all images
+            entries = [
+                f"{uvs[i][0]} {uvs[i][1]} {i+1}"
+                for i in range(N)
+            ]
+            f_img.write(" ".join(entries) + "\n")
+
+    # ---------------- points3D.txt ----------------
+    with open(os.path.join(sparse_path, "points3D.txt"), "w") as f_pts:
+
+        for i in range(N):
+            pid = i + 1
+            x, y, z = xyz_flat[i]
+            r, g, b = rgb_flat[i]
+
+            r = int(np.clip(r * 255.0, 0, 255))
+            g = int(np.clip(g * 255.0, 0, 255))
+            b = int(np.clip(b * 255.0, 0, 255))
+
+            # Track across all images
+            track_entries = " ".join(
+                f"{img_id} {i}"
+                for img_id in range(1, n_imgs + 1)
+            )
+
+            f_pts.write(
+                f"{pid} {x} {y} {z} "
+                f"{r} {g} {b} "
+                f"0.0 {track_entries}\n"
+            )
+
+
+
+
+def create_mesh_keyframes(mesh, N, col_keyframes_path):
+    poses = []
+    image_names = []
+
+    os.makedirs(col_keyframes_path, exist_ok=True)
+
+    for i in range(1, N + 1):
+        pose = get_cam_pose_from_mesh_view(mesh, f"choose pose{i}")
+        img, _ = render_mesh_pic(mesh, pose)
+        save_img(img, str(i), col_keyframes_path)
+
+        poses.append(pose)
+        image_names.append(f"{i}.png")
+
+    return poses, image_names
 
 
 
@@ -902,23 +1279,25 @@ def remove_edge_features(coords, mask, nbr_features, radius=2):
 
 
 def main() :
-
+    
     # Fixed Vars :
     lambda_gain = 0.3
     dt = 0.1
     all_nbr_ftrs = 250
     nbr_features = 10
+
     # Scale the mesh to meters, for office_2 nearly 1 meter corresp to 4 units
     scale = (1/4) 
-
 
     # Load a 3d mesh nearly in meters
     mesh = load_mesh(mesh_path, scale, False)
 
+    
     # Visualize and choose a real initial pose || use the saved one
     """init_pose = get_cam_pose_from_mesh_view(mesh)
-    np.save("init_pose.npy", init_pose)"""
-    init_pose = np.load("init_pose.npy")
+    np.save("numpy_data/init_pose.npy", init_pose)"""
+    init_pose = np.load("numpy_data/init_pose.npy")
+
 
     # Move init_pose to origin
     mesh.transform(np.linalg.inv(init_pose))
@@ -927,51 +1306,48 @@ def main() :
 
     # Take initial mesh pic 
     init_mesh_img, _ = render_mesh_pic(mesh, init_pose)
-    save_img(init_mesh_img, 0, o3d_frames_path)
-    
-
+   
 
     # Apply moge on the init real img || load ready mogepoints
-    moge_points_o3d, moge_points, moge_colors = get_moge_points(init_mesh_img) # moge scene dist from cam is not accurate
-    np.save("moge_points.npy", moge_points)
-    np.save("moge_colors.npy", moge_colors)
-    moge_points = np.load("moge_points.npy")
-    moge_colors = np.load("moge_colors.npy")
+    moge_points_o3d, moge_points, moge_colors, moge_mask = get_moge_points(init_mesh_img) # moge scene dist from cam is not accurate
+    np.save("numpy_data/moge_points.npy", moge_points)
+    np.save("numpy_data/moge_colors.npy", moge_colors)
+    np.save("numpy_data/moge_mask.npy", moge_mask)
+    moge_points = np.load("numpy_data/moge_points.npy")
+    moge_colors = np.load("numpy_data/moge_colors.npy")
+    moge_mask = np.load("numpy_data/moge_mask.npy")
     moge_points_o3d = o3d.io.read_point_cloud(moge_points_save_path)
 
-    negative_z_points = moge_points[moge_points[:, 2] < 0]
+     # Choosing a des_pose from mesh
+    des_gs_pose = get_cam_pose_from_mesh_view(moge_points_o3d, "choose des pose")
 
-    print("Points with negative Z:")
-    print(negative_z_points)
-    
-    # Choosing a des_pose from moge points 
-    des_gs_pose = get_cam_pose_from_mesh_view(moge_points_o3d)
+   
+#__________________________________________________
+
 
     # Visualize all
-    visualize_scene([moge_points_o3d, mesh])  
+    #visualize_scene([moge_points_o3d, mesh])  
 
  
     # Init gaussians from moge_points & Rendering gs initial pose img 
     gaussians_list = init_gaussians_from_points(moge_points, moge_colors, gs_save_path)    
     init_gs_img, init_gs_depth = render_gs_pic(*gaussians_list, T=init_pose, K=intrins_gs, W=CAM_W, H=CAM_H)
-    plot_2_imgs(init_gs_img, init_gs_depth, "init_gs_img", "init_gs_depth")
 
 
     # Check init depth map, get contours from it
     edge_mask = utils3d.np.depth_map_edge(init_gs_depth, rtol=0.008) # shape H*W
-    plot_2_imgs(init_gs_depth, edge_mask, "gs_depth", "depth_edges")
-
+    #plot_2_imgs(init_gs_depth, edge_mask, "gs_depth", "depth_edges")
 
     # Render des_gs_img and des_mesh_img
     des_gs_img, _ = render_gs_pic(*gaussians_list, T=des_gs_pose, K=intrins_gs, W=CAM_W, H=CAM_H)
     gray_des_gs_img = 0.299 * des_gs_img[:, :, 0] + 0.587 * des_gs_img[:, :, 1] + 0.114 * des_gs_img[:, :, 2]
     des_mesh_img, _ = render_mesh_pic(mesh, des_gs_pose)
     #des_gs_img = des_mesh_img
-    """plot_2_imgs(init_mesh_img, init_gs_img, "init_mesh_img",  "init_gs_img")
+    plot_2_imgs(init_mesh_img, init_gs_img, "init_mesh_img",  "init_gs_img")
     plot_2_imgs(des_mesh_img, des_gs_img, "des_mesh_img",  "des_gs_img")
     plot_2_imgs(init_gs_img, des_gs_img, "init_gs_img",  "des_gs_img")
     save_img(des_mesh_img, "desired", o3d_frames_path)
-    save_img(des_gs_img, "desired", gs_frames_path)"""
+    save_img(des_gs_img, "desired", gs_frames_path)
 
 
 
@@ -981,7 +1357,12 @@ def main() :
     # Starting IBVS loop
     cur_gs_pose = init_pose
     matp_vis = LiveOptimizationVisualizer(init_gs_img)
-    
+
+
+
+
+
+ 
     try:    
         for i in range(999) :
 
