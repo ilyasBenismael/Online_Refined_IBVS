@@ -95,20 +95,42 @@ class LinAlgeb :
         T[:3, :3] = R
         T[:3, 3] = t
         return T
+    
 
 
+
+    @staticmethod
+    def get_Rt_from_homog_matrix(T: np.ndarray):
+        R = T[:3, :3]
+        t = T[:3, 3]
+        return R, t
+
+
+    @staticmethod
     def get_homog_frm_vect(pose_vector) :
         R,t = LinAlgeb.make_rot_trans(*pose_vector)
-        return LinAlgeb.get_homog_matrix(R,t)
+        return LinAlgeb.get_homog_frm_rt(R,t)
 
+
+
+    @staticmethod
+    def inverse_mat(pose_mat) :
+        return np.linalg.inv(pose_mat)
+    
 
 
     # ------------- Direct transform frame of a point using homog matrix -------------------
 
     @staticmethod
-    def transform_points_to_world(p_in_cam: List[Sequence[float]],
+    def transform_points_to_world(p_in_cam,
                         cam_homog : np.ndarray) -> List[float]:
         
+        # Convert to numpy
+        p_in_cam = np.asarray(p_in_cam, dtype=np.float64)
+
+        # flatten to (H*W,3) if H,W,3)
+        p_in_cam = p_in_cam.reshape(-1, 3)
+
         # (Camera -> World)
         # p_world = cur_cam_rot * p_cam + cur_cam_trans
         cam_rot = cam_homog[:3, :3]
@@ -124,8 +146,14 @@ class LinAlgeb :
     # ------------ Inverse transform frame of a point using homog matrix --------------------  
      
     @staticmethod 
-    def transform_points_to_cam(p_in_world: List[Sequence[float]],
+    def transform_points_to_cam(p_in_world,
                         cam_homog : np.ndarray) -> List[float]:
+        
+        # Convert to numpy
+        p_in_world = np.asarray(p_in_world, dtype=np.float64)
+
+        # flatten to (H*W,3) if H,W,3)
+        p_in_world = p_in_world.reshape(-1, 3)
 
         # (in World -> in Camera)
         # p_cam = cam_rot^T * (p_world - cam_trans)

@@ -808,6 +808,13 @@ def main() :
 
 
 
+# loop, turning cur and des to flat grayscale (s nd s_star), getting gradx and grady of the cur img, getting img depth, computing img inter matrix, calc V, 
+
+
+# giving lask_kf_gs1_pose, last des_img, 
+
+
+
 
     #____________________________________________________________________________________
 
@@ -817,13 +824,12 @@ def main() :
 
             if (i==0) :
                 cur_pose = init_pose
-                matp_vis = LiveOptimizationVisualizer(des_mesh_img, init_mesh_img)
                 gray_des = 0.299 * des_mesh_img[:, :, 0] + 0.587 * des_mesh_img[:, :, 1] + 0.114 * des_mesh_img[:, :, 2]
                 S_star = gray_des.flatten()
 
             # 1 - Capture current img nd get S
             cur_mesh_img, cur_mesh_depth = render_mesh_pic(mesh, cur_pose)
-            save_img(cur_mesh_img, i, o3d_frames_path)
+            
             gray_cur = 0.299 * cur_mesh_img[:, :, 0] + 0.587 * cur_mesh_img[:, :, 1] + 0.114 * cur_mesh_img[:, :, 2]
             S = gray_cur.flatten()
 
@@ -832,47 +838,29 @@ def main() :
             diff = S - S_star
             cost = diff.T @ diff
             print(f"Cost {i} :", cost)
-            current_diff_img = compute_grayscale_difference(gray_cur, gray_des)
+
+            if (i % 20) == 0 :
+                current_diff_img = compute_grayscale_difference(gray_cur, gray_des)
+                save_img(cur_mesh_img, i, o3d_frames_path)
+                save_img(current_diff_img, f"diff_{i}", o3d_frames_path)
+
 
             # 3 - Compute Gradient and Ls 
             grad_Ix, grad_Iy = get_grads_visp(gray_cur)
             Ls = compute_image_interaction_matrix(cur_mesh_depth, grad_Ix, grad_Iy)
-
-
-            # 4- scaling the v based on our pose
-            if cost > 40000 :  
-                max_val = 0.02 
-                mu = 999999   
-            elif cost > 10000 :  
-                max_val = 0.01 
-                mu=999999 
-            elif cost > 500 :  
-                max_val = 0.01  
-                mu=0.0000001 
-            elif cost > 50 :  
-                max_val = 0.001  
-                mu=0.0000001 
-            elif cost > 15 : 
-                max_val = 0.001  
-            else : 
-                break 
                     
 
-            # 5 - Compute V with GN or LM 
+            # 4 - Compute V with GN or LM 
+            mu = 0.01
             V = -lamda * np.linalg.solve(Ls.T @ Ls + mu * np.diag(np.diag(Ls.T @ Ls)), Ls.T @ diff)      
             #V = -lamda * np.linalg.pinv(Ls) @ diff
-            V = scale_by_max(V, max_val)
-
-            
-            # 6 - Update camera pose & update matplotlib vis data
+   
+            # 5 - Update camera pose & update matplotlib vis data
             cur_pose = update_cam_pose(cur_pose, V, dt)
-            matp_vis.update(i, cur_mesh_img, cur_mesh_img, current_diff_img, V,  cost)
-
-        matp_vis.close()
+ 
 
     except KeyboardInterrupt:
         print("\nCtrl+C detected, exiting loop cleanly.")
-        matp_vis.close()
         os._exit(0)
 
 

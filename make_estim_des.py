@@ -4,21 +4,39 @@ import torch
 from utils.lin_algeb import LinAlgeb
 from utils.gaussians_handling import GaussiansHandling
 from plyfile import PlyData
+from utils.mesh_handling import MeshHandling
+from utils.poses_handling import PosesHandling
 from utils.image_handling import ImageHandling
+from utils.my_utils import MyUtils
 import pycolmap
 
 
 
 # Paths 
-case_path = "my_results/playroom/case_1"
-gs1_colmap_path = "my_results/playroom/sfm_playroom_aligned/"
-gs1_sparse_path = f"{gs1_colmap_path}/sparse/1"
-gs1_images_path = f"{gs1_colmap_path}/images"
-gs1_path = "my_results/playroom/playroom.ply"
 
+
+# Main_tests path for shortcuts
+
+scene_name = "thehouse"
+case_nbr = 3
+main_test_path = "my_results/online_ibvs_test"
+case_test_path = f"{main_test_path}/{scene_name}/{scene_name}_case{case_nbr}"
+
+
+# GS1 paths
+gs1_sfm_path = f"{main_test_path}/{scene_name}/real_scene/sfm_{scene_name}"
+gs1_ply_path = f"{main_test_path}/{scene_name}/real_scene/{scene_name}.ply"
+gs1_sfm_aligned_path = f"{case_test_path}/gs1_sfm_aligned"
+
+# All States to be saved, paths
+des_imgs_path = f"{case_test_path}/desired_imgs"
+keyframes_path = f"{case_test_path}/keyframes"
+sfms_path = f"{case_test_path}/sfms"
+
+#/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/thehouse/thehouse_case2/
 
 # Robot camera
-CAM_W, CAM_H = 1264, 832
+CAM_W, CAM_H = 1332, 876  
 FX = FY = 0.8 * max(CAM_W, CAM_H)
 f=1
 CX, CY = CAM_W / 2.0, CAM_H / 2.0
@@ -157,7 +175,7 @@ def get_sfm_poses(recon) :
         T_cw = image.cam_from_world()   # Rigid3d
         R = T_cw.rotation.matrix()      # (3,3)
         t = T_cw.translation            # (3,)
-        T_h = LinAlgeb.get_homog_matrix(R,t)
+        T_h = LinAlgeb.get_homog_frm_rt(R,t)
         homog_poses[image.name] = T_h
 
     return homog_poses
@@ -242,64 +260,86 @@ def load_gaussians_from_ply(path, device="cuda"):
 
 
 
-
-
-
-
 def main() :
 
-    is_estim_des_ready = True 
-    estim_des_name = "estim_des.png"
+    des1_ready = False
+    des1_aligned = False 
+    des1_GT_ready = False
+    init_img_gs1_name = "IMG_6385.jpg"
+
+    # make init_img_name.txt
+    with open("init_img_name.txt", "w") as f:
+        f.write(init_img_gs1_name + "\n")
+
+    # Load gaussians1 & Get gs1 camera 
+    gaussians1 = load_gaussians_from_ply(gs1_ply_path)
+    recons1 = PosesHandling.get_recons(gs1_sfm_path)
+    K = PosesHandling.get_cam_matrix(recons1)
+    intrins_gs1 = GaussiansHandling.turn_cam_matrix_to_gsplat_format(K)
+
+    # Get init_pose_gs1 & render kf1 & save it
+    init_img_pose_gs1 = PosesHandling.get_img_sfm_pose(recons1, init_img_gs1_name)
+    keyframe1, _ = GaussiansHandling.render_gs_pic(*gaussians1, init_img_pose_gs1, intrins_gs1, CAM_W, CAM_H)
+    ImageHandling.save_img(keyframe1, "keyframe1", keyframes_path)
     
-    # If estim_des already aligned with GS1 we get GT
-    if(is_estim_des_ready) : 
+    
+    if not des1_ready : 
+        # Load moge_img from gs1_sfm
+        keyframe1 = ImageHandling.load_np_img(f"{keyframes_path}/keyframe1.png")    
         
-        # Get moge_img
-        estim_des_img = ImageHandling.load_np_img(f"{case_path}/{estim_des_name}")    
-        
-        # Load gaussians and init_pose from colmap data
-        gaussians = load_gaussians_from_ply(gs1_path)
-        recon = pycolmap.Reconstruction(gs1_sparse_path)
-        poses_dict = get_sfm_poses(recon)
-        gt_des_pose = np.linalg.inv(poses_dict[estim_des_name])
-
-        # Get a camera K matrix (first camera)
-        camera_id = list(recon.cameras.keys())[0]
-        camera = recon.cameras[camera_id]
-        K = camera.calibration_matrix()
-        # Turn it to gsplat format
-        intrins_gs1 = (
-        torch.from_numpy(K)          
-        .float()                     
-        .to("cuda")                  
-        .unsqueeze(0)                
-    )
-        # Render init pic 
-        gt_des_img, _ = GaussiansHandling.render_gs_pic(*gaussians, gt_des_pose, intrins_gs1, CAM_W, CAM_H)
-        ImageHandling.plot_2_imgs(estim_des_img, gt_des_img)
-        ImageHandling.save_img(gt_des_img, "GT_des", case_path)
-        
-
-    else :
-
-        # Loading initial image    
-        init_real_img_path = f"{case_path}/real_init.png"
-        init_real_img = ImageHandling.load_np_img(init_real_img_path)
-
         # Apply Moge on it
-        moge_points_o3d, _, _ = GaussiansHandling.get_moge_points(init_real_img) 
-
-        # Choose & save estim_des from moge points
+        masked_points, masked_colors, all_moge_points, all_moge_colors, moge_mask = GaussiansHandling.get_moge_points(keyframe1, model_reso_lvl = 1, use_fp16_bool = False) 
+        moge_points_o3d = MeshHandling.turn_points_to_o3d(masked_points, masked_colors) 
+        
+        # get des1 from kf1 moge points
         moge_des_pose = get_cam_pose_from_mesh_view(moge_points_o3d)
         des_estim_img, _ = render_mesh_pic(moge_points_o3d, moge_des_pose)
-        ImageHandling.save_img(des_estim_img, "estim_des", case_path)
-        ImageHandling.plot_2_imgs(init_real_img, des_estim_img)    
+        ImageHandling.save_img(des_estim_img, "des1", des_imgs_path)
+        ImageHandling.plot_2_imgs(keyframe1, des_estim_img)     
 
 
+    if not des1_aligned :
+        # copy gs1_sfm and align des1 with it
+        MyUtils.copy_any(gs1_sfm_path, gs1_sfm_aligned_path, overwrite=True)
+        PosesHandling.align_new_image(f"{des_imgs_path}/des1.png", gs1_sfm_aligned_path)
+    
+
+    if not des1_GT_ready :
+        # Render nd save des_GT  
+        recons1_align = PosesHandling.get_recons(gs1_sfm_aligned_path)
+        gt_des_pose = PosesHandling.get_img_sfm_pose(recons1_align, "des1.png")
+        gt_des_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, gt_des_pose, intrins_gs1, CAM_W, CAM_H)
+        
+        des_estim_img = ImageHandling.load_np_img(f"{des_imgs_path}/des1.png")
+        ImageHandling.save_img(gt_des_img, "GT_des", des_imgs_path)
+            
+
+    # Align all of them
+    #PosesHandling.apply_sfm_reconstruction(f"{sfms_path}/sfm1")
+  
+
+    # Make the square imgs and check them
+    mvmnt_length = 0.5
+    nghbr1_pose = init_img_pose_gs1 @ LinAlgeb.get_homog_frm_vect([mvmnt_length,0,0,0,0,0])
+    nghbr1_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, nghbr1_pose, intrins_gs1, CAM_W, CAM_H)
+    nghbr2_pose =  nghbr1_pose @ LinAlgeb.get_homog_frm_vect([0,mvmnt_length,0,0,0,0])
+    nghbr2_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, nghbr2_pose, intrins_gs1, CAM_W, CAM_H)
+    nghbr3_pose = nghbr2_pose @ LinAlgeb.get_homog_frm_vect([-mvmnt_length,0,0,0,0,0])
+    nghbr3_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, nghbr3_pose, intrins_gs1, CAM_W, CAM_H)
+    ImageHandling.plot_4_imgs(keyframe1, nghbr1_img, nghbr2_img, nghbr3_img)
 
 
+    # Make sfm1 folder, put init des and nghbrs in it 
+    PosesHandling.create_sfm_structure(sfms_path, "sfm1")
+    MyUtils.copy_any(f"{keyframes_path}/keyframe1.png", f"{sfms_path}/sfm1/images/keyframe1.png", True)
+    MyUtils.copy_any(f"{des_imgs_path}/des1.png", f"{sfms_path}/sfm1/images/des1.png", True)
+    ImageHandling.save_img(nghbr1_img, "nghbr1", f"{sfms_path}/sfm1/images")
+    ImageHandling.save_img(nghbr2_img, "nghbr2", f"{sfms_path}/sfm1/images")
+    ImageHandling.save_img(nghbr3_img, "nghbr3", f"{sfms_path}/sfm1/images")
 
-
+    # Align all of them
+    PosesHandling.apply_sfm_reconstruction(f"{sfms_path}/sfm1")
+        
 
 if __name__ == "__main__":
     main()

@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 from PIL import Image
-import os
+import os, io
 
 
 
@@ -10,13 +10,33 @@ import os
 
 class ImageHandling :
 
+
+
+    @staticmethod
+    def return_crrct_extns_img_path(img_path):
+        # If the path already exists → return it
+        if os.path.exists(img_path):
+            return img_path
+
+        # If not , Split path into base + extension
+        base, _ = os.path.splitext(img_path)
+        # Try possible extensions
+        for ext in [".png", ".jpg", ".jpeg"]:
+            new_path = base + ext
+            if os.path.exists(new_path):
+                return new_path
+            
+            
+
     @staticmethod
     def load_np_img(img_path) :
+        img_path = ImageHandling.return_crrct_extns_img_path(img_path)
         img = Image.open(img_path).convert("RGB")
         return np.array(img)
 
+
     @staticmethod
-    def plot_img(des_img, title) :
+    def plot_img(des_img, title="") :
         plt.imshow(des_img)
         plt.axis("off")
         plt.suptitle(title)
@@ -43,6 +63,49 @@ class ImageHandling :
         plt.show()
 
 
+
+
+
+    @staticmethod
+    def plot_4_imgs(img1, img2, img3, img4,
+                    title1="", title2="", title3="", title4="",
+                    show=True, save=False):
+
+        numpy_img = None
+        fig, axs = plt.subplots(2, 2, figsize=(10, 10))
+
+        axs[0, 0].imshow(img1); axs[0, 0].axis("off"); axs[0, 0].set_title(title1)
+        axs[0, 1].imshow(img2); axs[0, 1].axis("off"); axs[0, 1].set_title(title2)
+        axs[1, 0].imshow(img3); axs[1, 0].axis("off"); axs[1, 0].set_title(title3)
+        axs[1, 1].imshow(img4); axs[1, 1].axis("off"); axs[1, 1].set_title(title4)
+
+        plt.tight_layout()
+
+        if save:
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png')
+            buf.seek(0)
+            numpy_img = np.frombuffer(buf.getvalue(), dtype=np.uint8)
+            numpy_img = cv2.imdecode(numpy_img, cv2.IMREAD_COLOR)
+            numpy_img = cv2.cvtColor(numpy_img, cv2.COLOR_BGR2RGB)
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig) # (preventing auto-display)
+
+        return numpy_img
+
+
+
+
+
+
+
+
+
+
+
     @staticmethod
     def save_img(img, title, folder_path, assume_rgb=True):
         os.makedirs(folder_path, exist_ok=True)
@@ -51,6 +114,12 @@ class ImageHandling :
         if assume_rgb:
             img_u8 = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(folder_path, f"{title}.png"), img_u8)
+
+
+
+
+
+
 
 
     @staticmethod
@@ -74,6 +143,69 @@ class ImageHandling :
     
 
 
+
+
+    @staticmethod
+    def turn_img_to_gray(img) :
+        return 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
+
+
+
+    @staticmethod
+    def compute_texturemap_and_mask(image_rgb, threshold=0.05):
+        """
+        Args:
+            image_rgb: (H, W, 3)
+            threshold: float in [0,1]
+
+        Returns:
+            texture_map: (H, W) in [0,1]
+            masked_rgb: (H, W, 3) with low-texture pixels set to black
+        """
+
+        # --- Texture map
+        gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+
+        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+
+        magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        texture_map = magnitude / (np.max(magnitude) + 1e-8)
+
+        # --- Mask
+        mask = texture_map > threshold  # (H, W)
+
+        return texture_map, mask
+
+
+
+
+
+    @staticmethod
+    def img_255_to_01(img):
+        img = np.asarray(img)
+        # If already in [0,1], just return float version
+        if img.dtype != np.uint8 and img.max() <= 1.0:
+            return img.astype(np.float32)
+        # Otherwise assume [0,255]
+        return img.astype(np.float32) / 255.0
+
+
+
+    @staticmethod
+    def img_01_to_255(img):
+        # Ensure float
+        img = np.asarray(img, dtype=np.float32)
+        # Clip to [0,1] to avoid overflow
+        img = np.clip(img, 0.0, 1.0)
+        # Scale and convert to uint8
+        img_255 = (img * 255.0).astype(np.uint8)
+
+        return img_255
+
+
+
+
     @staticmethod
     def compute_grayscale_difference(img1, img2, normalize=True):
         img1_float = img1.astype(np.float32)
@@ -95,6 +227,10 @@ class ImageHandling :
         return diff
 
 
+    @staticmethod
+    def turn_img_to_gray(img) :
+        gray_img = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
+        return gray_img
 
 
     @staticmethod
@@ -130,6 +266,43 @@ class ImageHandling :
 
 
 
+
+
+
+    @staticmethod
+    def get_grads_visp(I, FX, FY):
+        # coefficients
+        c1 = 2047.0
+        c2 = 913.0
+        c3 = 112.0
+        norm = 8418.0
+
+        H, W = I.shape
+        I = I.astype(np.float64)
+
+        # adding edges length 3 in all sides (they get the value of their neighbours)
+        I_padded = np.pad(I, pad_width=3, mode='edge')
+
+        # X derivative (horizontal)
+        # we can divide the width indinces of the padded-img as follows: 0(1st elmnt of pad_img)-3(crspnd to 1st elmnt of orig-img)-H+3(crspnd to last elmnt of orig-img)-H+6(lst elmnt of pd-img)
+        dI_du = (
+            c1 * (I_padded[3:H+3, 4:W+4] - I_padded[3:H+3, 2:W+2]) +  # j+1 vs j-1
+            c2 * (I_padded[3:H+3, 5:W+5] - I_padded[3:H+3, 1:W+1]) +  # j+2 vs j-2
+            c3 * (I_padded[3:H+3, 6:W+6] - I_padded[3:H+3, 0:W+0])    # j+3 vs j-3
+        ) / norm
+
+        # Y derivative (vertical)
+        dI_dv = (
+            c1 * (I_padded[4:H+4, 3:W+3] - I_padded[2:H+2, 3:W+3]) +  # i+1 vs i-1
+            c2 * (I_padded[5:H+5, 3:W+3] - I_padded[1:H+1, 3:W+3]) +  # i+2 vs i-2
+            c3 * (I_padded[6:H+6, 3:W+3] - I_padded[0:H+0, 3:W+3])    # i+3 vs i-3
+        ) / norm
+
+        # turning grad values to frm pxls to cam units
+        Ix = FX * dI_du
+        Iy = FY * dI_dv
+
+        return Ix, Iy
 
 
 

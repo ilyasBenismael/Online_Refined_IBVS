@@ -249,3 +249,69 @@ class MainVisualizer:
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")  
         plt.pause(0.001)
+
+
+    @staticmethod
+    def plot_multiple_trajectories(all_trajectories, desired_T):
+
+        plt.ioff()
+
+        fig = plt.figure(figsize=(12, 12))  # scene
+        ax = fig.add_subplot(111, projection='3d')
+
+        all_points = []
+
+        for i, traj_list in enumerate(all_trajectories):
+
+            traj_array = np.array(traj_list)
+            positions = traj_array[:, :3, 3]
+            all_points.append(positions)
+
+            # trajectory
+            ax.plot(positions[:, 0],
+                    positions[:, 1],
+                    positions[:, 2],
+                    color='red',
+                    linewidth=2)
+
+            first_T = traj_array[0]
+            last_T = traj_array[-1]
+
+            #MainVisualizer.draw_frame(ax, first_T, length=0.15)
+            MainVisualizer.draw_frame(ax, last_T, length=0.15)
+
+            # label
+            origin = first_T[:3, 3]
+            ax.text(origin[0], origin[1], origin[2],
+                    f"key_frame_{i+1}",
+                    fontsize=9)
+
+        # ---- desired frame ----
+        MainVisualizer.draw_frame(ax, desired_T, length=0.2)
+
+        des_origin = desired_T[:3, 3]
+        ax.text(des_origin[0], des_origin[1], des_origin[2],
+                "desired",
+                fontsize=11,
+                color='black')
+
+        # ---- bounds ---
+        all_points.append(desired_T[:3, 3].reshape(1, 3))
+        all_points = np.vstack(all_points)
+
+        center = np.mean(all_points, axis=0)
+        span = np.max(np.linalg.norm(all_points - center, axis=1))
+
+        margin = max(span * 0.8, 0.5)  # balanced zoom
+
+        ax.set_xlim(center[0] - margin, center[0] + margin)
+        ax.set_ylim(center[1] - margin, center[1] + margin)
+        ax.set_zlim(center[2] - margin, center[2] + margin)
+
+        ax.set_box_aspect([1, 1, 1])
+
+        ax.set_xlabel("X", fontsize=12)
+        ax.set_ylabel("Y", fontsize=12)
+        ax.set_zlabel("Z", fontsize=12)
+
+        plt.show()

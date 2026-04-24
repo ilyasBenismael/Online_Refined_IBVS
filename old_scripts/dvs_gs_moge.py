@@ -421,8 +421,6 @@ def make_ply_from_points(xyz, rgb, ply_path, scale=0.01, alpha=0.95, sh_degree=2
 
 
 
-
-
 def init_gaussians_from_points(
     xyz,
     rgb,
