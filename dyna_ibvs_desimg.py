@@ -858,7 +858,6 @@ def main() :
             log("Getting keyframe sfm's 2d-3d points..", time.time() - _t)
                 
             # Keep only moge points corresp to sfm (& removing masked points (inf values..))
-            # Get curr_frame sfm's 2Ds 3Ds
             print("✅ Filter moge points corresponding to sfm 3d points.. ")
             _t = time.time()
             x = img_sfm_points_2d[:,0].astype(int)

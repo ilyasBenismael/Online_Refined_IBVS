@@ -5,6 +5,7 @@ import subprocess
 import os
 import pycolmap
 import shutil
+import heapq
 
 
 
@@ -191,5 +192,74 @@ class PosesHandling :
         MyUtils.run_cmd(cmd)
         
 
+
+
+
+
+
+
+
+    @staticmethod
+    def astar_from_voxel_centers(all_centers, occupied_centers, start, goal, voxel_size):
+
+        all_centers = np.asarray(all_centers, dtype=float)
+        occupied_centers = np.asarray(occupied_centers, dtype=float).reshape(-1, 3)
+
+        # 1. Recover grid origin
+        min_corner = all_centers.min(axis=0) - voxel_size / 2
+
+        # 2. Convert center → index
+        def to_idx(p):
+            return tuple(np.floor((p - min_corner) / voxel_size).astype(int))
+
+        start_idx = to_idx(start)
+        goal_idx  = to_idx(goal)
+
+        # Convert occupied centers → indices
+        occupied_idx = set(map(tuple, np.floor((occupied_centers - min_corner) / voxel_size).astype(int)))
+
+        # 3. A* setup
+        neighbors = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
+
+        def heuristic(a, b):
+            return np.linalg.norm(np.array(a) - np.array(b))
+
+        open_set = []
+        heapq.heappush(open_set, (0, start_idx))
+
+        came_from = {}
+        g_score = {start_idx: 0}
+
+        # 4. A* loop
+        while open_set:
+            _, current = heapq.heappop(open_set)
+
+            if current == goal_idx:
+                # reconstruct path
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                path = path[::-1]
+
+                # convert back to centers
+                path_world = min_corner + (np.array(path) + 0.5) * voxel_size
+                return path_world
+
+            for dx, dy, dz in neighbors:
+                neighbor = (current[0]+dx, current[1]+dy, current[2]+dz)
+
+                if neighbor in occupied_idx:
+                    continue
+
+                tentative_g = g_score[current] + 1
+
+                if neighbor not in g_score or tentative_g < g_score[neighbor]:
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    f = tentative_g + heuristic(neighbor, goal_idx)
+                    heapq.heappush(open_set, (f, neighbor))
+
+        return None
 
 

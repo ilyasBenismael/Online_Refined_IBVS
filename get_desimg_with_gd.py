@@ -90,7 +90,6 @@ logits_filt = logits[keep].cpu()
 
 
 
-
 # Keep only number of detections I want (with best scores)
 if len(boxes_filt) > max_detections:
     top_scores, top_indices = scores_filt.topk(max_detections)
@@ -110,7 +109,6 @@ for logit in logits_filt:
 print(f"\nDetected {len(boxes_filt)} objects (threshold={BOX_THRESHOLD}):")
 for label, score in zip(labels, scores_filt):
     print(f"  {label:30s}  score: {score:.3f}")
-
 
 
 

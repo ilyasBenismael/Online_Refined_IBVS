@@ -102,10 +102,11 @@ class MeshHandling :
 
 
     @staticmethod
-    def turn_points_to_spheres(points) :
+    def turn_points_to_spheres(points, raduis = 0.1) :
         
         n = len(points)
         colors = plt.cm.hsv(np.linspace(0, 1, n))[:, :3]
+        colors = [[0, 0, 1] for _ in range(n)]  # pure blue (RGB)
         spheres=[]
         i=-1
 
@@ -114,7 +115,7 @@ class MeshHandling :
             i+=1
             
             # Create sphere mesh
-            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.05)
+            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=raduis)
             
             # Translate sphere to the point location
             sphere.translate(point)
@@ -363,7 +364,7 @@ class MeshHandling :
 
 
 
-
+    @staticmethod
     def denoise_pcd(pcd):
 
         # estimate average spacing
@@ -380,4 +381,135 @@ class MeshHandling :
 
 
 
+
+
+    @staticmethod
+    def get_o3d_box_frm_corners(corners):
+        # Define the 12 edges of a box
+        lines = [
+            [0,1], [1,3], [3,2], [2,0],  # bottom face
+            [4,5], [5,7], [7,6], [6,4],  # top face
+            [0,4], [1,5], [2,6], [3,7]   # vertical edges
+        ]
+
+        colors = [[0, 1, 0] for _ in lines]  # red lines
+
+        line_set = o3d.geometry.LineSet()
+        line_set.points = o3d.utility.Vector3dVector(corners)
+        line_set.lines = o3d.utility.Vector2iVector(lines)
+        line_set.colors = o3d.utility.Vector3dVector(colors)
+
+        return line_set
+        
+
+
+
+
+    @staticmethod
+    def get_box_from_two_points(p1, p2, margin=1.0):
+        p1 = np.array(p1)
+        p2 = np.array(p2)
+
+        # Get min/max corners
+        min_corner = np.minimum(p1, p2) - margin
+        max_corner = np.maximum(p1, p2) + margin
+
+        # Extract values
+        x_min, y_min, z_min = min_corner
+        x_max, y_max, z_max = max_corner
+
+        # 8 corners of the box
+        corners = np.array([
+            [x_min, y_min, z_min],
+            [x_min, y_min, z_max],
+            [x_min, y_max, z_min],
+            [x_min, y_max, z_max],
+            [x_max, y_min, z_min],
+            [x_max, y_min, z_max],
+            [x_max, y_max, z_min],
+            [x_max, y_max, z_max],
+        ])
+
+        return corners    
     
+
+
+
+
+
+    @staticmethod
+    def get_cube_from_center(center, margin=1.0):
+        center = np.array(center, dtype=float)
+
+        # Compute min/max corners
+        min_corner = center - margin
+        max_corner = center + margin
+
+        # Extract values
+        x_min, y_min, z_min = min_corner
+        x_max, y_max, z_max = max_corner
+
+        # 8 corners of the cube
+        corners = np.array([
+            [x_min, y_min, z_min],
+            [x_min, y_min, z_max],
+            [x_min, y_max, z_min],
+            [x_min, y_max, z_max],
+            [x_max, y_min, z_min],
+            [x_max, y_min, z_max],
+            [x_max, y_max, z_min],
+            [x_max, y_max, z_max],
+        ], dtype=float)
+
+        return corners
+
+
+    @staticmethod
+    def get_voxel_centers_from_box_corners(corners, voxel_size):
+        corners = np.asarray(corners, dtype=float).reshape(-1, 3)
+
+        # Extract min/max from corners
+        min_corner = corners.min(axis=0)
+        max_corner = corners.max(axis=0)
+
+        # Compute box size
+        dims = max_corner - min_corner
+
+        # Number of voxels (extend → ceil)
+        nx, ny, nz = np.ceil(dims / voxel_size).astype(int)
+
+        # Generate voxel centers
+        xs = min_corner[0] + (np.arange(nx) + 0.5) * voxel_size
+        ys = min_corner[1] + (np.arange(ny) + 0.5) * voxel_size
+        zs = min_corner[2] + (np.arange(nz) + 0.5) * voxel_size
+
+        # Create 3D grid
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing='ij')
+        centers = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+
+        return centers
+    
+
+
+    @staticmethod
+    def get_occupied_voxel(voxel_centers, moge_points, voxel_size):
+        voxel_centers = np.asarray(voxel_centers, dtype=float)
+        moge_points = np.asarray(moge_points, dtype=float)
+
+        # Recover grid bounds
+        min_corner = voxel_centers.min(axis=0) - voxel_size / 2
+        max_corner = voxel_centers.max(axis=0) + voxel_size / 2
+
+        # FILTER points inside the box
+        mask = np.all((moge_points >= min_corner) & (moge_points <= max_corner), axis=1)
+        moge_points = moge_points[mask]
+
+        # Map to indices
+        indices = np.floor((moge_points - min_corner) / voxel_size).astype(int)
+
+        unique_indices = np.unique(indices, axis=0)
+
+        # Back to centers
+        centers = min_corner + (unique_indices + 0.5) * voxel_size
+
+        return centers
