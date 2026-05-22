@@ -57,7 +57,6 @@ class GaussiansHandling :
         args.disable_viewer     = True
         args.detect_anomaly     = False
 
-
         # Step 4 - Extract param groups and run training
         training(
             lp.extract(args),

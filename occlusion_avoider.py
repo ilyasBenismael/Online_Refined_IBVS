@@ -36,17 +36,11 @@ ImageHandling.save_img(img_with_masks, "img_with_masks", home_path)
 np.save("sam_masks.npy", sam_masks)
 
 
-
-
-
-
-
-
-
-
-
-
 """
+
+
+
+
 
 
 
@@ -66,6 +60,14 @@ import open3d as o3d
 import torch
 from PIL import Image
 from moge.model.v2 import MoGeModel
+
+
+
+
+
+
+
+
 
 def look_at_pose(C, P):
     z = P - C

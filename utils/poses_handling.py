@@ -103,7 +103,7 @@ class PosesHandling :
 
 
     @staticmethod
-    def apply_sfm_reconstruction(sfm_path) :
+    def apply_sfm_reconstruction(sfm_path, sequential = True) :
 
         images_path = f"{sfm_path}/images"
         sparse_path = f"{sfm_path}/sparse"
@@ -123,8 +123,12 @@ class PosesHandling :
         )
 
         # 3. Sequential matching
+        matcher = "sequential"
+        if not sequential :
+            matcher = "exhaustive"
+        
         MyUtils.run_cmd(
-            f"colmap sequential_matcher "
+            f"colmap {matcher}_matcher "
             f"--database_path {database_path} "
             f"--FeatureMatching.use_gpu 1"
         )
