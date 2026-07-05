@@ -12,8 +12,59 @@ from utils.poses_handling import PosesHandling
 from utils.my_utils import MyUtils
 import pycolmap
 from moge.model.v2 import MoGeModel
-import time
+import time, path
 
+
+
+
+
+"""
+from pathlib import Path
+import shutil
+
+input_dir = Path("/home/user/Bureau/visual_navigation/IBVS_CODE/datasets/360_v2/room/images_2")
+output_dir = Path("/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/room2/sfm/images")
+output_dir.mkdir(exist_ok=True)
+
+images = sorted(
+    [p for p in input_dir.iterdir()
+     if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}]
+)
+
+# Keep 2 out of every 5 images
+for i, img_path in enumerate(images):
+    if i % 5 in (0, 1):
+        shutil.copy2(img_path, output_dir / img_path.name)
+
+print(f"Copied {len(list(output_dir.iterdir()))} images")
+
+
+"""
+
+sfm_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/tree/sfm"
+inria_output = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/garden/inria"
+     
+PosesHandling.apply_sfm_reconstruction(sfm_path, False)
+#GaussiansHandling.run_gs_training(sfm_path=sfm_path, output_path= inria_output, gs_reso = 4)
+
+
+
+"""
+
+import os
+import open3d as o3d
+import numpy as np
+from utils.lin_algeb import LinAlgeb
+import matplotlib.pyplot as plt
+import math
+from utils.image_handling import ImageHandling
+from utils.gaussians_handling import GaussiansHandling
+import torch
+from utils.poses_handling import PosesHandling
+from utils.my_utils import MyUtils
+import pycolmap
+from moge.model.v2 import MoGeModel
+import time
 
 
 
@@ -270,4 +321,11 @@ if __name__ == "__main__":
 
 
 
+
+
+        
+
+
+
+"""
 

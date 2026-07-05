@@ -1,5 +1,4 @@
 import multiprocessing as mp
-
 import os
 import sys
 import open3d as o3d
@@ -19,6 +18,11 @@ import pycolmap
 import shutil
 from moge.model.v2 import MoGeModel
 import time
+from datetime import datetime
+from utils.ibvs_tools import IbvsTools
+from wcwidth import wcswidth
+import emoji
+
 
 # Add accelerated_features to our Python paths , so that when featx script gets executed it will know where to find the modules
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -33,12 +37,17 @@ from modules.xfeat import XFeat
 # Paths___________________________________________________________
 
 # Main_tests path for shortcuts
-scene_name = "playroom"
+scene_name = "kitchen"
 case_nbr = 1
 main_test_path = "my_results/online_ibvs_test"
 case_test_path = f"{main_test_path}/{scene_name}/{scene_name}_case{case_nbr}"
 
+
+# Results txt files
 results_txt_file = f"{case_test_path}/results.txt"
+ibvs_infos_npy_path = f"{case_test_path}/ibvs_infos.npy"
+des_depths_npy_path = f"{case_test_path}/des_depths.npy"
+ibvs_frame_depths_npy_path = f"{case_test_path}/ibvs_frame_depths.npy"
 
 
 # GS_inria_path for training
@@ -60,67 +69,48 @@ real_frames_path = f"{case_test_path}/ibvs_frames/real_frames"
 matches_frames_path = f"{case_test_path}/ibvs_frames/matches_frames"
 
 # init & des imgs info
-init_img_name_sfm1 = "DSC05590.jpg"
-des_img_name_sfm1 = des_img_name_sfm_gs2 = "des0.png"
+init_img_name_sfm1 = "DSCF5893.JPG"
+des_img_name_sfm1 = des_img_name_sfm_gs2 = gt_des_name = "des0.png"
 
 
 # Configs__________________________________________________________
-#np.set_printoptions(precision=8, suppress=False)
+np.set_printoptions(precision=8, suppress=False)
 _xfeat = None
-_intrins_gs1 = None
-
 
 
 # Robot camera______________________________________________________
-CAM_W, CAM_H = 1264, 832
-FX = FY = 0.8 * max(CAM_W, CAM_H)
-f=1
-CX, CY = CAM_W / 2.0, CAM_H / 2.0
+CAM_W, CAM_H =  3115, 2076
 
 
 # IBVS Vars_________________________________________________________
 lambda_gain = 0.1
-dt = 0.03
+dt_ibvs = 0.03
 ibvs_nbr_features = 10
 gs_reso = 1
 moge_reso = 4
 max_ibvs_nbr_itrs = 100
 kf_motion_ratio = 0.03    # 3% of screen
 kf_motion_nbr_features = 100
-pxl_pose_min_error = 0.001
-
-
-
-
-
+ibvs_pxl_error_conv = 0.02
+ibvs_pxl_error_kf = 0.05
 
 
 
 def get_xfeat_model():
     global _xfeat
-
     if _xfeat is None:
         _xfeat = XFeat()
     return _xfeat
 
 
-def get_intrins_gs1():
-    global _intrins_gs1
-
-    if _intrins_gs1 is None:
-        _intrins_gs1 = torch.tensor(
-            [
-                [FX, 0.0, CX],
-                [0.0, FY, CY],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=torch.float32,
-            device="cuda",
-        ).unsqueeze(0)
-    return _intrins_gs1
 
 
 
+def get_intrins_gs1(gs1_sfm_path):
+    recons1 = PosesHandling.get_recons(gs1_sfm_path)
+    K = PosesHandling.get_cam_matrix(recons1)
+    intrins_gs1 = GaussiansHandling.turn_cam_matrix_to_gsplat_format(K)
+    return intrins_gs1
 
 
 
@@ -201,42 +191,6 @@ def get_feats_depth(features, depth_map) :
 
 
 
-# -------------- Get errors --------------------------------
-def getting_errors(Ss : List[List[float]], Ss_star : List[List[float]]) -> List[float]:
-
-    return [a - b for row1, row2 in zip(Ss, Ss_star) for a, b in zip(row1, row2)]
-
-
-
-# ------------- Getting L and pseudo L --------------------
-def get_interaction_matrix(nbr_features, Ss, Ss_z, f):
-
-    Ls = np.zeros((nbr_features, 2, 6), dtype=float)
-
-    for i, s in enumerate(Ss) :
-        x=s[0]
-        y=s[1]
-        Z=Ss_z[i]
-
-        # Build interaction matrix (2x6)
-        L = np.zeros((2, 6))
-        L[0, 0] = -f / Z
-        L[0, 1] = 0.0
-        L[0, 2] = x / Z
-        L[0, 3] = x * y / f
-        L[0, 4] = -(f + (x * x) / f)
-        L[0, 5] = y
-        L[1, 0] = 0.0
-        L[1, 1] = -f / Z
-        L[1, 2] = y / Z
-        L[1, 3] = f + (y * y) / f
-        L[1, 4] = -(x * y) / f
-        L[1, 5] = -x
-
-        Ls[i] = L
-
-    return Ls
-
 
 def get_inter_mat_pseudo_inverse(intr_mat):
 
@@ -255,15 +209,6 @@ def get_inter_mat_pseudo_inverse(intr_mat):
     return pseudo_intr_mat
 
 
-
-
-def get_Ss_from_uv(uv_list):
-    Ss = []
-    for u, v in uv_list:
-        x = (u - CX) / FX
-        y = (v - CY) / FY
-        Ss.append([x, y])
-    return np.array(Ss)
 
 
 
@@ -302,9 +247,9 @@ def remove_edge_features(coords, mask, nbr_features, radius=2):
 
 
 
-def validate_keyframe(last_kf, curr_frame, xfeat,
+def validate_keyframe(last_kf, curr_frame, xfeat, ibvs_itr_nbr,
                       kf_motion_nbr_features=100,
-                      motion_thresh_ratio=0.03):
+                      motion_thresh_ratio=0.0):
 
     # 1. Match features
     pts_last, pts_curr = xfeat.match_xfeat(last_kf, curr_frame)
@@ -329,13 +274,10 @@ def validate_keyframe(last_kf, curr_frame, xfeat,
     # 5. Normalize by image width // get how % the median pxls is in img_width
     img_width = curr_frame.shape[1]
     motion_ratio = median_disp / img_width
+    print(f"🔵-{ibvs_itr_nbr} kf motion : {motion_ratio} pxls")
 
     # 6. Decision
     return motion_ratio > motion_thresh_ratio
-
-
-
-
 
 
 
@@ -359,307 +301,16 @@ def load_all_trajectories(folder_path, n):
 
 
 
-def start_dyna_ibvs_loop2(gaussians, init_pose_gs1, des_pose_gs1, init_img, des_gt_img, des_estim_img) :
-
-    try:
-
-        #matp_vis = MainVisualizer(init_img)
-        #fig, ax, trajectory = MainVisualizer.init_traject_visualizer(init_pose_gs1, des_pose_gs1)
-        cur_pose_gs1 = init_pose_gs1
-        intrins_gs1 = get_intrins_gs1()
-        xfeat_model = get_xfeat_model()
-        des_kpts, des_desc = get_xfeat_kpts(des_estim_img)
-
-        for i in range(2000) :
-
-            # Update 3d traject visualizer
-            #MainVisualizer.update_traject_visualizer(ax, init_pose_gs1, des_pose_gs1, cur_pose_gs1, trajectory)
-
-            # Render new cur_gs_pic and get its depthmap
-            cur_gs1_img, cur_gs1_depth_map = GaussiansHandling.render_gs_pic(*gaussians, T=cur_pose_gs1, K=intrins_gs1, W=CAM_W, H=CAM_H)
-
-            if i % 50 == 0 :
-                ImageHandling.save_img(cur_gs1_img, i, f"{case_test_path}/complete_ibvs")
-
-
-            # Match current_gs1 with des_estim using xfeat
-            cur_kpts, cur_desc = get_xfeat_kpts(cur_gs1_img)
-            idxs0, idxs1 = xfeat_model.match(cur_desc, des_desc)
-            matches_cur = cur_kpts[idxs0]
-            matches_des = des_kpts[idxs1]
-            matches_cur = matches_cur[:ibvs_nbr_features].to(torch.int).cpu().numpy()
-            matches_des = matches_des[:ibvs_nbr_features].to(torch.int).cpu().numpy()
-
-            if (len(matches_cur) < ibvs_nbr_features) :
-                raise Exception(f"only {len(matches_cur)} < {ibvs_nbr_features}")
-
-            #cur_mtch_gs_img = ImageHandling.draw_matches(matches_cur, matches_des, cur_gs1_img, des_estim_img)
-
-
-            # 2 - Get cur and des features
-            Ss_star = get_Ss_from_uv(matches_des)
-            Ss_cur = get_Ss_from_uv(matches_cur)
-            Ss_Z_cur = get_feats_depth(matches_cur, cur_gs1_depth_map)
-
-            # 3 - Get the error
-            errors = getting_errors(Ss_cur, Ss_star)
-            errors = np.asarray(errors, dtype=float).reshape(-1)
-
-            # Print the norm of the error
-            norm_of_error = np.linalg.norm(errors)
-            pose_error = LinAlgeb.pose_distance(cur_pose_gs1, des_pose_gs1)
-            print(f"IBVS iter {i} / 2D error : {norm_of_error:.4f} / Pose error is: {pose_error:.4f}")
-
-            # 4 - Get the intr matrix & its pseudo_inv
-            L = get_interaction_matrix(ibvs_nbr_features, Ss_cur, Ss_Z_cur, 1)
-            L_psinv = get_inter_mat_pseudo_inverse(L)
-
-            # 5 - Choose lambda and calculate V with control law
-            if norm_of_error < 0.00000001 :
-                break
-
-            V = - lambda_gain * (L_psinv @ errors)
-
-            # 6 - Update cur_cam_pose and update visualization
-            cur_pose_gs1 = update_cam_pose(cur_pose_gs1, V, dt)
-            #matp_vis.update(i, cur_mtch_gs_img, cur_gs1_img, des_gt_img, des_estim_img, V, norm_of_error)
-
-
-
-    except KeyboardInterrupt:
-            print("\nCtrl+C detected, exiting loop cleanly.")
-            #matp_vis.close()
-            #plt.ioff()
-            #plt.show()
-
-
-
-
 def get_xfeat_kpts(img) :
     xfeat_model = get_xfeat_model()
     tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
     tensor = tensor.unsqueeze(0)  # (1,3,H,W)
-    out = xfeat_model.detectAndCompute(tensor, top_k=500)[0]
+    out = xfeat_model.detectAndCompute(tensor, top_k=2048)[0]
     kpts = out['keypoints']
     desc = out['descriptors']
     return  kpts, desc
 
 
-
-
-
-
-
-def compute_image_interaction_matrix(cur_depth_map, grad_Ix, grad_Iy):
-
-    # Create 2d of just u coords nd 2d of just v coords, both (H, W)
-    u_coords, v_coords = np.meshgrid(np.arange(CAM_W), np.arange(CAM_H))
-
-    # get a 2d of x coords nd y coords in meters , both (H, W)
-    x = (u_coords - CX) / FX
-    y = (v_coords - CY) / FY
-
-    # get a copy of depth with 0s as 100
-    Z = cur_depth_map.copy()
-    Z[Z == 0] = 100
-
-    # Flatten everything for computation, from H,W to H*W
-    x_flat = x.ravel()
-    y_flat = y.ravel()
-    Z_flat = Z.ravel()
-    grad_Ix_flat = grad_Ix.ravel()
-    grad_Iy_flat = grad_Iy.ravel()
-
-
-    # we will do − (Ix_Lx + Iy_Ly)
-    # np.stack takes arrays of same shape nd stack nth element of each array in a single array then go to (n+1)th elemnt
-    # this will give [[lx1], [lx2], [lx2].. ]
-
-    Ix_Lx = grad_Ix_flat[:, None] * np.stack([
-        -f / Z_flat,
-        np.zeros_like(Z_flat),
-        x_flat / Z_flat,
-        x_flat * y_flat / f,
-        -(f + (x_flat * x_flat) / f),
-        y_flat
-    ], axis=1)  # (H*W, 6)
-
-    Iy_Ly = grad_Iy_flat[:, None] * np.stack([
-        np.zeros_like(Z_flat),
-        -f / Z_flat,
-        y_flat / Z_flat,
-        f + (y_flat * y_flat) / f,
-        -(x_flat * y_flat) / f,
-        -x_flat
-    ], axis=1)  # (H*W, 6)
-
-
-    Ls = -(Ix_Lx + Iy_Ly)  # (H*W, 6)
-    return Ls
-
-
-
-
-
-
-
-
-
-
-
-def start_dyna_ibvs_loop(gaussians, init_pose_gs1, des_pose_gs1, last_keyframe_gs1, des_estim_img, j) :
-
-    try:
-
-        #matp_vis = MainVisualizer(init_img)
-        #fig, ax, trajectory = MainVisualizer.init_traject_visualizer(init_pose_gs1, des_pose_gs1)
-        cur_pose_gs1 = init_pose_gs1
-        intrins_gs1 = get_intrins_gs1()
-        xfeat_model = get_xfeat_model()
-        des_kpts, des_desc = get_xfeat_kpts(des_estim_img)
-        norm_of_error = pose_error = None
-        i = 0
-
-        # In the begining i got to stay on the ibvs loop until finding a keyframe to make initial gs2
-        if j < 3 :
-            ibvs_nbr_itrs = 5000
-        else :
-            ibvs_nbr_itrs = max_ibvs_nbr_itrs
-
-        # When we get get past initial iterations motion gets slower, no new keyframes, but i still got to return some as kfs to improve gs2
-        if (j > 1) and (j % 10 == 0) :
-            return cur_pose_gs1, True, i, norm_of_error, pose_error
-
-
-        for i in range(ibvs_nbr_itrs) :
-
-            # Update 3d traject visualizer
-            #MainVisualizer.update_traject_visualizer(ax, init_pose_gs1, des_pose_gs1, cur_pose_gs1, trajectory)
-
-            # Render new cur_gs_pic and get its depthmap
-            cur_gs1_img, cur_gs1_depth_map = GaussiansHandling.render_gs_pic(*gaussians, T=cur_pose_gs1, K=intrins_gs1, W=CAM_W, H=CAM_H)
-
-
-            # Break if it's a keyframe (every 10 iterations (excluding first))
-            if i != 0 and (i % 10) == 0:
-                if validate_keyframe(last_keyframe_gs1, cur_gs1_img, xfeat_model, kf_motion_nbr_features= kf_motion_nbr_features, motion_thresh_ratio = kf_motion_ratio) :
-                    return cur_pose_gs1, True, i, norm_of_error, pose_error
-
-            # Match current_gs1 with des_estim using xfeat
-            cur_kpts, cur_desc = get_xfeat_kpts(cur_gs1_img)
-            idxs0, idxs1 = xfeat_model.match(cur_desc, des_desc)
-            matches_cur = cur_kpts[idxs0]
-            matches_des = des_kpts[idxs1]
-            matches_cur = matches_cur[:ibvs_nbr_features].to(torch.int).cpu().numpy()
-            matches_des = matches_des[:ibvs_nbr_features].to(torch.int).cpu().numpy()
-
-            if (len(matches_cur) < 4) :
-                raise Exception(f"only {len(matches_cur)} < {ibvs_nbr_features}")
-
-
-            if (i % 50) == 0 :
-                cur_mtch_gs_img = ImageHandling.draw_matches(matches_cur, matches_des, cur_gs1_img, des_estim_img)
-                ImageHandling.save_img(cur_gs1_img, i, f"{real_frames_path}/IBVS{j}")
-                ImageHandling.save_img(cur_mtch_gs_img, i, f"{matches_frames_path}/IBVS{j}")
-
-
-            # 2 - Get cur and des features
-            Ss_star = get_Ss_from_uv(matches_des)
-            Ss_cur = get_Ss_from_uv(matches_cur)
-            Ss_Z_cur = get_feats_depth(matches_cur, cur_gs1_depth_map)
-
-            # 3 - Get the error
-            errors = getting_errors(Ss_cur, Ss_star)
-            errors = np.asarray(errors, dtype=float).reshape(-1)
-
-            # Print the norm of the error
-            norm_of_error = np.linalg.norm(errors)
-            pose_error = LinAlgeb.pose_distance(cur_pose_gs1, des_pose_gs1)
-            print(f"IBVS iter {i} / 2D error : {norm_of_error} / Pose error is: {pose_error:.4f}")
-
-
-            # 4 - Get the intr matrix & its pseudo_inv
-            L = get_interaction_matrix(len(matches_cur), Ss_cur, Ss_Z_cur, 1)
-            L_psinv = get_inter_mat_pseudo_inverse(L)
-
-            # 5 - Choose lambda and calculate V with control law
-            if norm_of_error < 0.000001 :
-                return cur_pose_gs1, False, i, norm_of_error, pose_error
-
-            V = - lambda_gain * (L_psinv @ errors)
-
-            # 6 - Update cur_cam_pose and update visualization
-            cur_pose_gs1 = update_cam_pose(cur_pose_gs1, V, dt)
-            #matp_vis.update(i, cur_mtch_gs_img, cur_gs1_img, des_gt_img, des_estim_img, V, norm_of_error)
-
-        plt.ioff()
-        plt.show()
-        #matp_vis.close()
-        return cur_pose_gs1, False, i, norm_of_error, pose_error
-
-
-    except KeyboardInterrupt:
-            print("\nCtrl+C detected, exiting loop cleanly.")
-
-            # got to do something else here
-            #matp_vis.close()
-            plt.ioff()
-            plt.show()
-            MyUtils.cleanup()
-            return cur_pose_gs1, False, i, norm_of_error, pose_error
-
-
-
-
-
-
-
-
-def start_dvs_loop(gaussians, init_gs1_pose, des_img) :
-
-    try:
-        for i in range(999):
-
-            if (i==0) :
-                cur_pose = init_gs1_pose
-                gray_des = 0.299 * des_img[:, :, 0] + 0.587 * des_img[:, :, 1] + 0.114 * des_img[:, :, 2]
-                S_star = gray_des.flatten()
-
-            # 1 - Capture current img nd get S
-            cur_img, cur_depth = GaussiansHandling.render_gs_pic(gaussians, cur_pose)
-            gray_cur = 0.299 * cur_img[:, :, 0] + 0.587 * cur_img[:, :, 1] + 0.114 * cur_img[:, :, 2]
-            S = gray_cur.flatten()
-
-
-            # 2 - Compute the cost and the diff img for visua
-            diff = S - S_star
-            cost = diff.T @ diff
-            print(f"Cost {i} :", cost)
-
-            if (i % 20) == 0 :
-                current_diff_img = ImageHandling.compute_grayscale_difference(gray_cur, gray_des)
-                ImageHandling.save_img(cur_img, f"img_{i}", f"{real_frames_path}/DVS")
-                ImageHandling.save_img(current_diff_img, f"diff_{i}", f"{real_frames_path}/DVS")
-
-
-            # 3 - Compute Gradient and Ls
-            grad_Ix, grad_Iy = ImageHandling.get_grads_visp(gray_cur, FX, FY)
-            Ls = compute_image_interaction_matrix(cur_depth, grad_Ix, grad_Iy)
-
-
-            # 4 - Compute V with GN or LM
-            mu = 0.01
-            lamda = 0.1
-            V = -lamda * np.linalg.solve(Ls.T @ Ls + mu * np.diag(np.diag(Ls.T @ Ls)), Ls.T @ diff)
-            #V = -lamda * np.linalg.pinv(Ls) @ diff
-
-            # 5 - Update camera pose & update matplotlib vis data
-            cur_pose = update_cam_pose(cur_pose, V, dt)
-
-
-    except KeyboardInterrupt:
-        print("\nCtrl+C detected, exiting loop cleanly.")
-        os._exit(0)
 
 
 
@@ -716,6 +367,72 @@ return"""
 
 
 
+ 
+MSG_WIDTH  = 67
+NUM_WIDTH  = 10
+TIME_WIDTH = 14
+ 
+def _display_width(text: str) -> int:
+    """Return true terminal display width, correctly handling emojis and wide chars."""
+    cleaned = emoji.replace_emoji(text, replace="__")  # each emoji -> 2-wide placeholder
+    w = wcswidth(cleaned)
+    return w if w >= 0 else len(cleaned)
+ 
+ 
+def _pad(text: str, width: int) -> str:
+    """Pad text to a fixed display width."""
+    padding = width - _display_width(text)
+    return text + " " * max(padding, 0)
+ 
+ 
+def _fmt_time(t: float) -> str:
+    """Convert a time.time() float to HH:MM:SS.mmm format."""
+    dt = datetime.fromtimestamp(t)
+    return dt.strftime("%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+ 
+
+def log_to_table(message: str, source: str, dt: float, file_path: str = results_txt_file):
+    MSG_WIDTH  = 55
+    NUM_WIDTH  = 10
+    TIME_WIDTH = 14
+ 
+    SEP = ("+" + "-" * MSG_WIDTH
+         + "+" + "-" * MSG_WIDTH
+         + "+" + "-" * NUM_WIDTH
+         + "+" + "-" * TIME_WIDTH + "+\n")
+    BLANK = " " * MSG_WIDTH
+ 
+    dt_str   = f"{dt:.3f}"
+    time_str = _fmt_time(time.time())
+ 
+    if not os.path.exists(file_path):
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(SEP)
+            f.write(
+                f"|{_pad('  IBVS', MSG_WIDTH)}"
+                f"|{_pad('  GS', MSG_WIDTH)}"
+                f"|{_pad('  DT', NUM_WIDTH)}"
+                f"|{_pad('  TIME', TIME_WIDTH)}|\n"
+            )
+            f.write(SEP)
+ 
+    src = source.strip().lower()
+    if src == "ibvs":
+        row = (f"|{_pad(' ' + message, MSG_WIDTH)}"
+               f"|{BLANK}"
+               f"|{_pad(' ' + dt_str, NUM_WIDTH)}"
+               f"|{_pad(' ' + time_str, TIME_WIDTH)}|\n")
+    elif src == "gs":
+        row = (f"|{BLANK}"
+               f"|{_pad(' ' + message, MSG_WIDTH)}"
+               f"|{_pad(' ' + dt_str, NUM_WIDTH)}"
+               f"|{_pad(' ' + time_str, TIME_WIDTH)}|\n")
+    else:
+        raise ValueError("source must be 'ibvs' or 'gs'")
+ 
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(row)
+        f.write(SEP)
 
 
 
@@ -725,46 +442,51 @@ return"""
 
 
 
-def dyna_ibvs_loop(shared, kf_queue, des_img_queue, kf_event, des_img_event, gs1_ply_path, init_pose_gs1, gt_des_pose_gs1, init_keyframe, des_img) :
+
+
+def dyna_ibvs_loop(shared, kf_queue, des_img_queue, kf_event, gs1_ply_path, init_pose_gs1, gt_des_pose_gs1, init_keyframe, des_img) :
 
     try:
-        print(f"🔵- Just entered dyna_ibvs_loop")
+        msg = f"🔵Ibvs_loop launched"; print(msg)
+        log_to_table(msg, 'ibvs', 0)
         _t = time.time()
         gaussians1 = GaussiansHandling.load_gaussians_from_ply(gs1_ply_path)
-        intrins_gs1 = get_intrins_gs1()
+        intrins_gs1 = get_intrins_gs1(gs1_sfm_path)
         xfeat_model = get_xfeat_model()
         cur_pose_gs1 = init_pose_gs1
         last_keyframe = init_keyframe
         des_kpts, des_desc = get_xfeat_kpts(des_img)
-        norm_of_error = pose_error = None
+        pxl_error = pose_error = None
         i = 0
         des_vrsn = 0
-        print(f"🔵- Just loaded xfeat and gs1 and got des_img kpnts || {time.time()-_t:.3f} s"); _t = time.time()
+        final_kf_sent = False
+        msg = f"🔵Loaded xfeat and gs1"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s"); _t = time.time()
+        log_to_table(msg, 'ibvs', dt)
+        ibvs_tools = IbvsTools(CAM_W, CAM_H)
 
         while not shared["stop"] :
             i+=1;_t = time.time()
             
             # Check if GS_loop got us new des_img, then update it
-            if des_img_event.is_set():
-
-                # Getting the last one in the queue (normally it s always just one des img in the queue)
+            if not des_img_queue.empty():
                 while not des_img_queue.empty():
                     des_img = des_img_queue.get()
+                    des_vrsn += 1
                     des_kpts, des_desc = get_xfeat_kpts(des_img)
-                    des_vrsn+=1
-                    print(f"🔵{i}- We got a new desimg {des_vrsn}")
+                    msg = f"🔵🔵{i}-Got new des_img({des_vrsn})"; print(msg)
+                    log_to_table(msg, 'ibvs', 0)
 
-                des_img_event.clear()
 
             # Render new cur_gs_pic and get its depth_map
             cur_gs1_img, cur_gs1_depth_map = GaussiansHandling.render_gs_pic(*gaussians1, T=cur_pose_gs1, K=intrins_gs1, W=CAM_W, H=CAM_H)
 
             # Notify GS_Loop if it's a keyframe
-            if validate_keyframe(last_keyframe, cur_gs1_img, xfeat_model, kf_motion_nbr_features= kf_motion_nbr_features, motion_thresh_ratio = kf_motion_ratio) :
+            if validate_keyframe(last_keyframe, cur_gs1_img, xfeat_model, ibvs_itr_nbr=i, kf_motion_nbr_features= kf_motion_nbr_features, motion_thresh_ratio = kf_motion_ratio) :
                 last_keyframe = cur_gs1_img
                 kf_queue.put(last_keyframe)
                 kf_event.set()
-                print(f"!🔵{i}- Keyframe was found and sent to gsloop")
+                msg = f"🔵🔵{i}-Keyframe was found and sent to gsloop"; print(msg)
+                log_to_table(msg, 'ibvs', 0)
 
             # 1 - Match current_gs1_frame with des_img
             cur_kpts, cur_desc = get_xfeat_kpts(cur_gs1_img)
@@ -774,48 +496,68 @@ def dyna_ibvs_loop(shared, kf_queue, des_img_queue, kf_event, des_img_event, gs1
             matches_cur = matches_cur[:ibvs_nbr_features].to(torch.int).cpu().numpy()
             matches_des = matches_des[:ibvs_nbr_features].to(torch.int).cpu().numpy()
 
+
             # Stop if we got occluded or got no matches
             if (len(matches_cur) < 4) :
                 shared["stop"] = True
-                print(f"!!!!🔵{i}- Not enough matches during ibvs")
+                msg = f"!!!!🔵{i}- Not enough matches during ibvs"; print(msg)
+                log_to_table(msg, 'ibvs', 0)
+                cur_mtch_gs_img = ImageHandling.draw_matches(matches_cur, matches_des, cur_gs1_img, des_img)
+                ImageHandling.save_img(cur_mtch_gs_img, i, matches_frames_path) 
                 raise Exception(f"only {len(matches_cur)} < {ibvs_nbr_features}")
 
             # 2 - Get ss and depth from the matches (to make intr matrix)
-            Ss_star = get_Ss_from_uv(matches_des)
-            Ss_cur = get_Ss_from_uv(matches_cur)
-            Ss_Z_cur = get_feats_depth(matches_cur, cur_gs1_depth_map)
+            Ss_star = ibvs_tools.get_Ss_from_uv(matches_des)
+            Ss_cur = ibvs_tools.get_Ss_from_uv(matches_cur)
+            Ss_Z_cur = ibvs_tools.get_feats_depth(matches_cur, cur_gs1_depth_map)
 
             # 3 - Get the error vector
-            errors = getting_errors(Ss_cur, Ss_star)
+            errors = ibvs_tools.getting_errors(Ss_cur, Ss_star)
             errors = np.asarray(errors, dtype=float).reshape(-1)
 
             # Print the norm of the error
-            norm_of_error = np.linalg.norm(errors)
+            pxl_error = np.linalg.norm(errors)
             pose_error = LinAlgeb.pose_distance(cur_pose_gs1, gt_des_pose_gs1)
-            print(f"🔵{i}- IBVS :: 2D error : {norm_of_error} / Pose error is: {pose_error:.4f} || {time.time()-_t:.3f} s")
+            msg = f"🔵{i}-IBVS: 2d_err:{pxl_error:.4f} | des_img({des_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+
 
             # 4 - Get the intr matrix & its pseudo_inv & calc V with control law
-            L = get_interaction_matrix(len(matches_cur), Ss_cur, Ss_Z_cur, 1)
+            L = ibvs_tools.get_interaction_matrix(len(matches_cur), Ss_cur, Ss_Z_cur, 1)
             L_psinv = get_inter_mat_pseudo_inverse(L)
             V = - lambda_gain * (L_psinv @ errors)
 
             # 5 - Update cur_cam_pose and update visualization
-            cur_pose_gs1 = update_cam_pose(cur_pose_gs1, V, dt)
+            cur_pose_gs1 = update_cam_pose(cur_pose_gs1, V, dt_ibvs)
 
             # Check if we converged
-            if norm_of_error < pxl_pose_min_error :
+            if pxl_error < ibvs_pxl_error_conv :
                 shared["stop"] = True
 
-            # Save the matches each 5 times & clean the memo
+            # Check if we need to send a final kf
+            if (pxl_error < ibvs_pxl_error_kf) and (not final_kf_sent) :
+                last_keyframe = cur_gs1_img
+                kf_queue.put(last_keyframe)
+                kf_event.set()
+                final_kf_sent = True
+                msg = f"🔵🔵{i}-Last kf found"; print(msg)
+                log_to_table(msg, 'ibvs', 0)
+
+            # Save the infos of each ibvs iteration : 2d_err, 3d_err, condit_nbr, V, matches, pose_in_glbl_gs
+            ibvs_infos = [pxl_error, pose_error, LinAlgeb.get_mat_condition_number(L), V, [matches_cur, matches_des],cur_pose_gs1]
+            MyUtils.save_arrays_to_npy(ibvs_infos_npy_path, i, ibvs_infos)
+
+
             if (i % 5) == 0 :
+                log_to_table(msg, 'ibvs', dt)
                 cur_mtch_gs_img = ImageHandling.draw_matches(matches_cur, matches_des, cur_gs1_img, des_img)
                 ImageHandling.save_img(cur_gs1_img, i, real_frames_path)
-                ImageHandling.save_img(cur_mtch_gs_img, i, matches_frames_path)    
+                ImageHandling.save_img(cur_mtch_gs_img, i, matches_frames_path)   
+                MyUtils.save_arrays_to_npy(ibvs_frame_depths_npy_path, i, cur_gs1_depth_map) 
                 MyUtils.cleanup()
 
 
-    except KeyboardInterrupt:
-            print("\nCtrl+C detected, exiting loop cleanly.")
+    except Exception as e:
+            print(f"Error in ibvs_loop {e} !!!!")
             MyUtils.cleanup()
             shared["stop"] = True
 
@@ -825,122 +567,169 @@ def dyna_ibvs_loop(shared, kf_queue, des_img_queue, kf_event, des_img_event, gs1
 
 
 
-def local_gs_loop(shared, kf_queue, des_img_queue, kf_event, des_img_event) :
-    
-    print(f"🟢 Just got into local_gs_loop"); _t = time.time()
-    i=0
-    kf_vrsn = 0
-    last_kf_versn = 0
-    moge_model = None
-    curr_recons2 = pycolmap.Reconstruction(f"{sfms_path}/sfm0/sparse/0")
-    K = PosesHandling.get_cam_matrix(curr_recons2)
-    intrins_gs2 = GaussiansHandling.turn_cam_matrix_to_gsplat_format(K)    
-    des_pose_gs2 = PosesHandling.get_img_sfm_pose(curr_recons2, des_img_name_sfm_gs2)
-    print(f"🟢{i}- Just loaded sfm0 infos || {time.time()-_t:.3f} s"); _t = time.time()
-    
 
-    while not shared["stop"]:
-        i+=1
 
-        if kf_event.is_set():
-            
-            # Loading moge model once in the beg
-            if moge_model is None:
-                moge_model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to("cuda")
-                print(f"🟢{i}- Just Loaded Moge model || {time.time()-_t:.3f} s"); _t = time.time()
 
+def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
+
+    try : 
+
+        import queue
+        msg = f"🟢GS_loop launched"; print(msg)
+        log_to_table(msg, 'gs', 0); _t = time.time()
+        i=0
+        kf_vrsn = 0
+        last_kf_versn = 0
+        moge_model = None
+        curr_recons2 = pycolmap.Reconstruction(f"{sfms_path}/sfm0/sparse/0")
+        K = PosesHandling.get_cam_matrix(curr_recons2)
+        intrins_gs2 = GaussiansHandling.turn_cam_matrix_to_gsplat_format(K)    
+        des_pose_gs2 = PosesHandling.get_img_sfm_pose(curr_recons2, des_img_name_sfm_gs2)
+        msg = f"🟢{i}-Loaded local_gs infos"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+        log_to_table(msg, 'gs', dt); _t = time.time()        
+
+        while not shared["stop"]:
+            i+=1
             # Looping on all kfs (getting last one (probably there is only one keyframe, cuz we can't find more than kf that fast before updating gs)
+            curr_keyframe = None
             while not kf_queue.empty():
                 curr_keyframe = kf_queue.get()
-                kf_vrsn+=1
-                print(f"🟢{i}- Received kf {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
-
-            # Saving this keyframe
-            ImageHandling.save_img(curr_keyframe, f"keyframe{kf_vrsn}", keyframes_path)
-            print(f"🟢{i}- Saved kf {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
-
-            # Get last saved sfm and align kf with it and save
-            MyUtils.copy_any(f"{sfms_path}/sfm{last_kf_versn}", f"{sfms_path}/sfm{kf_vrsn}")
-            PosesHandling.align_new_image(new_image_path=f"{keyframes_path}/keyframe{kf_vrsn}.png", sfm_path=f"{sfms_path}/sfm{kf_vrsn}")
-            last_kf_versn = kf_vrsn
-            print(f"🟢{i}- Just aligned kf {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
-
-            # Get the kf pose in local_gs and get rendered_kf
-            curr_recons2 = pycolmap.Reconstruction(f"{sfms_path}/sfm{kf_vrsn}/sparse/0")
-            curr_keyframe_pose_gs2 = PosesHandling.get_img_sfm_pose(curr_recons2, f"keyframe{kf_vrsn}.png")
-            last_gaussians2 = GaussiansHandling.load_gaussians_from_ply(f"{gs2s_dir_path}/gs2_{i-1}.ply")
-            curr_keyframe_gs2_render, _ = GaussiansHandling.render_gs_pic(*last_gaussians2, curr_keyframe_pose_gs2, intrins_gs2, CAM_W, CAM_H)
-            print(f"🟢{i}- Got kf pose & loaded last gs2 & rendered kf_render {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
-
-            # Get txtr map from original kf and render kf, and compute new textured pixels mask
-            _, txtr_mask_kf = ImageHandling.compute_texturemap_and_mask(curr_keyframe, threshold=0.05)
-            _, txtr_mask_rndr_kf = ImageHandling.compute_texturemap_and_mask(curr_keyframe_gs2_render, threshold=0.01)
-            txtr_mask = txtr_mask_kf & (~txtr_mask_rndr_kf)
-            print(f"🟢{i}- Computed txtr masks of kfs : {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
-
-            # Get moge points from kf to align with sfm nd add to local_gs)
-            _, _, all_moge_points, all_moge_colors, moge_mask  = GaussiansHandling.get_moge_points(curr_keyframe, depth_edge_threshold=0.05, moge_model = moge_model, use_fp16_bool=False, model_reso_lvl=2)
-            final_mask = moge_mask & txtr_mask    # update final mask with moge mask, cuz the pixels with inf 3d value should be avoided
-            print(f"🟢{i}- Got moge points of kf {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
-
-            # Get curr_frame sfm's 2ds 3ds to align moge points
-            img_sfm_points_2d, img_sfm_points_3d = PosesHandling.get_2d_3d_points_of_img(curr_recons2, f"keyframe{kf_vrsn}.png")
-
-            # Keep only moge points corresp to sfm (& removing masked points (inf values..))
-            x = img_sfm_points_2d[:,0].astype(int)
-            y = img_sfm_points_2d[:,1].astype(int)
-            sfm_moge_points = all_moge_points[y, x]
-            sfm_mask = moge_mask[y, x]  # We didn't filter only txtrd ones cuz we want max points for gd alignement
-            sfm_moge_points = sfm_moge_points[sfm_mask]
-            img_sfm_points_3d = img_sfm_points_3d[sfm_mask]
-            print(f"🟢{i}- Got 2d-3d sfm points and filtered moge points of kf {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
-
-            # Get the transformation infos between sfm-cloud and moge-cloud
-            _, s, R, t = MeshHandling.align_points(sfm_moge_points, img_sfm_points_3d)
-
-            # Flatten all moge points and filter them (keep trusted+textured ones to turn to gaussians)
-            all_moge_colors_flat = all_moge_colors.reshape(-1, 3) # turning H,W,3 to H*W,3
-            all_moge_points_flat = all_moge_points.reshape(-1, 3).astype(np.float64)
-            final_mask_flat = final_mask.reshape(-1)  #turning H,W,1 to H*W,1
-            final_moge_colors = all_moge_colors_flat[final_mask_flat]
-            final_moge_points = all_moge_points_flat[final_mask_flat]
-
-            # Apply the calculated transformation on the final-clean moge points
-            final_moge_points = (s * (R @ final_moge_points.T)).T + t
-            print(f"🟢{i}- Flatten moge points and align them for kf {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
-
-            # Downsample, Turn points to gaussians, merge with old ones
-            final_moge_points = final_moge_points[::moge_reso]
-            final_moge_colors = final_moge_colors[::moge_reso]
-            new_gaussians = GaussiansHandling.turn_points_to_gaussians(final_moge_points, final_moge_colors)
-            new_gaussians = GaussiansHandling.merge_2_gaussians(last_gaussians2, new_gaussians)
-            print(f"🟢{i}- Turn points to gaussians for kf {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
-
-            # Saving mid-des-img too and the gs2 ply file
-            des_img_mid, _ = GaussiansHandling.render_gs_pic(*new_gaussians, des_pose_gs2, intrins_gs2, CAM_W, CAM_H)
-            ImageHandling.save_img(des_img_mid, f"des{i-1}_plus", des_imgs_path)
-            GaussiansHandling.turn_gaussians_to_ply(new_gaussians, f"{gs2s_dir_path}/gs2_{i}_pre.ply")
-            kf_event.clear() # We already handled the kf event so clear it
-            print(f"🟢{i}- Render new des and save the new gs2 for kf {kf_vrsn} || {time.time()-_t:.3f} s"); _t = time.time()
+                kf_vrsn += 1
+                msg = f"🟢🟢{i}-Received KF{kf_vrsn}"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+                log_to_table(msg, 'gs', dt); _t = time.time()
 
 
+            if curr_keyframe is not None:
+    
+                # Loading moge model once in the beg
+                if moge_model is None:
+                    moge_model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to("cuda")
+                    msg = f"🟢{i}-Just Loaded Moge model"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+                    log_to_table(msg, 'gs', dt); _t = time.time()
 
-        # Train last gs2_pre then save new gs2
-        print(f"🟢{i}- About to call run_gs_training || {time.time()-_t:.3f} s"); _t = time.time()
-        GaussiansHandling.run_gs_training(sfm_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{sfms_path}/sfm{kf_vrsn}", output_path= f"/home/user/Bureau/visual_navigation/IBVS_CODE/{gs2s_dir_path}/inria_output", gs_reso = gs_reso, gs_nbr_itrs = gs_nbr_itrs)
-        shutil.copy2(inria_saved_ply_path, f"{gs2s_dir_path}/gs2_{i}.ply")
-        print(f"🟢{i}- Trained the last gs2 for {gs_nbr_itrs} iterations nd save it || {time.time()-_t:.3f} s"); _t = time.time()
+                # Saving this keyframe
+                ImageHandling.save_img(curr_keyframe, f"keyframe{kf_vrsn}", keyframes_path)
+                msg = f"🟢{i}-Saved KF({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s"); _t = time.time()
 
-        # Loading the last saved gs2 & render new des img & notify ibvs loop
-        last_gaussians2 = GaussiansHandling.load_gaussians_from_ply(f"{gs2s_dir_path}/gs2_{i}.ply")
-        des_img, _ = GaussiansHandling.render_gs_pic(*last_gaussians2, des_pose_gs2, intrins_gs2, CAM_W, CAM_H)
-        ImageHandling.save_img(des_img, f"des{i}", des_imgs_path)
-        des_img_queue.put(des_img)
-        des_img_event.set()
-        print(f"!🟢{i}- Loading the last saved gs2 & render new des img & notify ibvs loop || {time.time()-_t:.3f} s"); _t = time.time()
+                # Get last saved sfm and align kf with it and save
+                MyUtils.copy_any(f"{sfms_path}/sfm{last_kf_versn}", f"{sfms_path}/sfm{kf_vrsn}")
+                PosesHandling.align_new_image(new_image_path=f"{keyframes_path}/keyframe{kf_vrsn}.png", sfm_path=f"{sfms_path}/sfm{kf_vrsn}")            
+                last_kf_versn = kf_vrsn
+                msg = f"🟢{i}-Just aligned KF({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+                log_to_table(msg, 'gs', dt); _t = time.time()
+                
+                # Get the kf pose in local_gs 
+                curr_recons2 = pycolmap.Reconstruction(f"{sfms_path}/sfm{kf_vrsn}/sparse/0")
+                try : 
+                    curr_keyframe_pose_gs2 = PosesHandling.get_img_sfm_pose(curr_recons2, f"keyframe{kf_vrsn}.png")
+                except :
+                    msg = f"🟢{i} !!!!! kf {kf_vrsn} was not aligned"; print(msg)
+                    log_to_table(msg, 'gs', 0)
+                    continue #most cmn errror is img not being aligned, if so we just skip this iteration, and wait for the
+                
+                # Get rendered_kf
+                last_gaussians2 = GaussiansHandling.load_gaussians_from_ply(f"{gs2s_dir_path}/gs2_{i-1}.ply")
+                curr_keyframe_gs2_render, _ = GaussiansHandling.render_gs_pic(*last_gaussians2, curr_keyframe_pose_gs2, intrins_gs2, CAM_W, CAM_H)
+                msg = f"🟢{i}-Loaded local_gs & rendered KF'({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+                log_to_table(msg, 'gs', dt); _t = time.time()
 
-        if (i % 5) == 0 :
-            MyUtils.cleanup()
+                # Get txtr map from original kf and render kf, and compute new textured pixels mask
+                _, txtr_mask_kf = ImageHandling.compute_texturemap_and_mask(curr_keyframe, threshold=0.05)
+                _, txtr_mask_rndr_kf = ImageHandling.compute_texturemap_and_mask(curr_keyframe_gs2_render, threshold=0.01)
+                txtr_mask = txtr_mask_kf & (~txtr_mask_rndr_kf)
+                msg = f"🟢{i}-Computed texture masks of KFs({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+                log_to_table(msg, 'gs', dt); _t = time.time()
+
+                # Get moge points from kf to align with sfm nd add to local_gs)
+                _, _, all_moge_points, all_moge_colors, moge_mask  = GaussiansHandling.get_moge_points(curr_keyframe, depth_edge_threshold=0.05, moge_model = moge_model, use_fp16_bool=False, model_reso_lvl=2)
+                final_mask = moge_mask & txtr_mask    # update final mask with moge mask, cuz the pixels with inf 3d value should be avoided
+                msg = f"🟢{i}-Got moge points of KF({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+                log_to_table(msg, 'gs', dt); _t = time.time()
+
+                # Get curr_frame sfm's 2ds 3ds to align moge points
+                img_sfm_points_2d, img_sfm_points_3d = PosesHandling.get_2d_3d_points_of_img(curr_recons2, f"keyframe{kf_vrsn}.png")
+
+                # Keep only moge points corresp to sfm (& removing masked points (inf values..))
+                x = img_sfm_points_2d[:,0].astype(int)
+                y = img_sfm_points_2d[:,1].astype(int)
+                sfm_moge_points = all_moge_points[y, x]
+                sfm_mask = moge_mask[y, x]  # We didn't filter only txtrd ones cuz we want max points for gd alignement
+                sfm_moge_points = sfm_moge_points[sfm_mask]
+                img_sfm_points_3d = img_sfm_points_3d[sfm_mask]
+
+                # Get the transformation infos between sfm-cloud and moge-cloud
+                _, s, R, t = MeshHandling.align_points(sfm_moge_points, img_sfm_points_3d)
+
+
+                #___________________________________________
+                """
+                sfm_moge_points_o3d = MeshHandling.turn_points_to_o3d(sfm_moge_points)
+                img_sfm_points_3d_o3d = MeshHandling.turn_points_to_o3d(img_sfm_points_3d)
+                MeshHandling.visualize_scene([sfm_moge_points_o3d, img_sfm_points_3d_o3d])
+                """
+                #___________________________________________
+
+
+                # Flatten all moge points and filter them (keep trusted+textured ones to turn to gaussians)
+                all_moge_colors_flat = all_moge_colors.reshape(-1, 3) # turning H,W,3 to H*W,3
+                all_moge_points_flat = all_moge_points.reshape(-1, 3).astype(np.float64)
+                final_mask_flat = final_mask.reshape(-1)  #turning H,W,1 to H*W,1
+                final_moge_colors = all_moge_colors_flat[final_mask_flat]
+                final_moge_points = all_moge_points_flat[final_mask_flat]
+
+                # Apply the calculated transformation on the final-clean moge points
+                final_moge_points = (s * (R @ final_moge_points.T)).T + t
+                msg = f"🟢{i}-Filter & Align moge points with sfm, KF({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+                log_to_table(msg, 'gs', dt); _t = time.time()
+
+                # Downsample, Turn points to gaussians, merge with old ones
+                final_moge_points = final_moge_points[::moge_reso]
+                final_moge_colors = final_moge_colors[::moge_reso]
+                new_gaussians = GaussiansHandling.turn_points_to_gaussians(final_moge_points, final_moge_colors)
+                new_gaussians = GaussiansHandling.merge_2_gaussians(last_gaussians2, new_gaussians)
+                msg = f"🟢{i}-Turn points to gaussians, KF({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s"); _t = time.time()
+                log_to_table(msg, 'gs', dt)
+
+                # Saving mid-des-img too and the gs2 ply file
+                des_img_mid, _ = GaussiansHandling.render_gs_pic(*new_gaussians, des_pose_gs2, intrins_gs2, CAM_W, CAM_H)
+                ImageHandling.save_img(des_img_mid, f"des{i-1}_plus", des_imgs_path)
+                GaussiansHandling.turn_gaussians_to_ply(new_gaussians, f"{gs2s_dir_path}/gs2_{i}_pre.ply")
+                msg = f"🟢{i}-Render & Saving mid_des_img, KF({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s"); _t = time.time()
+                log_to_table(msg, 'gs', dt)
+
+                
+
+            # Train last gs2_pre then save new gs2
+            _t = time.time()
+            GaussiansHandling.run_gs_training(sfm_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{sfms_path}/sfm{kf_vrsn}", output_path= f"/home/user/Bureau/visual_navigation/IBVS_CODE/{gs2s_dir_path}/inria_output", gs_reso = gs_reso, gs_nbr_itrs = gs_nbr_itrs)
+            shutil.copy2(inria_saved_ply_path, f"{gs2s_dir_path}/gs2_{i}.ply")
+            msg = f"🟢{i}-Trained local_gs for {gs_nbr_itrs} iterations"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s"); _t = time.time()
+            log_to_table(msg, 'gs', dt)
+
+            # Loading the last saved gs2 & render new des img & notify ibvs loop
+            last_gaussians2 = GaussiansHandling.load_gaussians_from_ply(f"{gs2s_dir_path}/gs2_{i}.ply")
+            des_img, des_depth = GaussiansHandling.render_gs_pic(*last_gaussians2, des_pose_gs2, intrins_gs2, CAM_W, CAM_H)
+            ImageHandling.save_img(des_img, f"des{i}", des_imgs_path)
+            des_img_queue.put(des_img)
+            des_img_event.set()
+
+            #saving some infos about des_img
+            msg = f"🟢🟢{i}-Loading local_gs & Rendering new des_img({i})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s")
+            log_to_table(msg, 'gs', dt); _t = time.time()
+            MyUtils.save_arrays_to_npy(des_depths_npy_path, i, des_depth)
+
+            if (i % 5) == 0 :
+                MyUtils.cleanup()
+
+    except Exception as e:
+        MyUtils.cleanup()
+        print(f"Error in gs_loop : {e} !!!!!!!!!!!!!!!!!")
+        shared["stop"] = True         
+
+
+
+
+
 
 
 
@@ -952,8 +741,9 @@ def local_gs_loop(shared, kf_queue, des_img_queue, kf_event, des_img_event) :
 
 def main() :
 
+
     # Start multi-process elements  // we can use fork or spawn (fork is faster and works on ubuntu)
-    ctx = mp.get_context("fork")
+    ctx = mp.get_context("spawn")
     manager = ctx.Manager()
     shared = manager.dict()
     shared["stop"] = False
@@ -970,11 +760,11 @@ def main() :
     # Get init/cur and des poses in gs1
     gs1_recon = pycolmap.Reconstruction(f"{gs1_sfm_path}/sparse/0")
     init_img_pose_gs1 = PosesHandling.get_img_sfm_pose(gs1_recon, init_img_name_sfm1)
-    gt_des_pose_gs1 = PosesHandling.get_img_sfm_pose(gs1_recon,"des0.png")
+    gt_des_pose_gs1 = PosesHandling.get_img_sfm_pose(gs1_recon,gt_des_name)
 
     # Starting the ibvs and gs loops after getting all the infos we need
-    p1 = ctx.Process(target=dyna_ibvs_loop, args=(shared, kf_queue, des_img_queue, kf_event, des_img_event, gs1_ply_path, init_img_pose_gs1, gt_des_pose_gs1, curr_keyframe, des_img))
-    p2 = ctx.Process(target=local_gs_loop, args=(shared, kf_queue, des_img_queue, kf_event, des_img_event))
+    p1 = ctx.Process(target=dyna_ibvs_loop, args=(shared, kf_queue, des_img_queue, kf_event, gs1_ply_path, init_img_pose_gs1, gt_des_pose_gs1, curr_keyframe, des_img))
+    p2 = ctx.Process(target=local_gs_loop, args=(shared, kf_queue, des_img_queue, des_img_event))
     p1.start()
     p2.start()
     p1.join()

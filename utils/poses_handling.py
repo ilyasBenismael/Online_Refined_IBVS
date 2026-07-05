@@ -170,33 +170,33 @@ class PosesHandling :
         sparse_path = os.path.join(sfm_path, "sparse/0")
 
         # Feature extraction (ONLY new image)
-        print("✅ Extracting features from keyframe..")
         cmd = (
             f"colmap feature_extractor "
             f"--database_path {db_path} "
             f"--image_path {images_dir} "
             f"--image_list_path {new_imgs_txt} "
-            f"--ImageReader.existing_camera_id 1")
+            f"--ImageReader.existing_camera_id 1 "
+            f"--FeatureExtraction.use_gpu 1 "
+            f"--SiftExtraction.max_num_features 1500 "
+        )
         MyUtils.run_cmd(cmd)
 
         # Matching
-        print("✅ Matching keyframe features with other images..")
         cmd = (
             f"colmap exhaustive_matcher "
-            f"--database_path {db_path}")
+            f"--database_path {db_path} "
+            f"--FeatureMatching.use_gpu 1"
+        )
         MyUtils.run_cmd(cmd)
 
         # Registration
-        print("✅ Algning keyframe with the other images..")
         cmd = (
             f"colmap image_registrator "
             f"--database_path {db_path} "
             f"--input_path {sparse_path} "
-            f"--output_path {sparse_path}")
+            f"--output_path {sparse_path}"
+        )
         MyUtils.run_cmd(cmd)
-        
-
-
 
 
 

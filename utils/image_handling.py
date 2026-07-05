@@ -3,6 +3,17 @@ import cv2
 import matplotlib.pyplot as plt
 from PIL import Image
 import os, io
+import sys
+from pathlib import Path
+
+# Path to IBVS_CODE
+project_root = Path(__file__).resolve().parents[2]
+# Add gaussian_splatting2 to Python path
+sys.path.insert(0, str(project_root / "gaussian_splatting2"))
+
+from utils.loss_utils import ssim
+from lpipsPyTorch import lpips
+from utils.image_utils import psnr
 
 
 
@@ -36,8 +47,8 @@ class ImageHandling :
 
 
     @staticmethod
-    def plot_img(des_img, title="") :
-        plt.imshow(des_img)
+    def plot_img(img, title="") :
+        plt.imshow(img)
         plt.axis("off")
         plt.suptitle(title)
         plt.show()
@@ -309,4 +320,19 @@ class ImageHandling :
 
 
 
+    @staticmethod
+    def calc_imgs_sim_metrics(img1, img2, i, mask = False) :
+        if mask :
+            
+            # apply mask on both img1 and img2 and 
+            pass
+        
+        ssim_score = ssim(img1, img2)
+        psnr_score = psnr(img1, img2)
+        lpips_score = lpips(img1, img2, net_type='vgg')
+        # save as .npy : to [i] : [ssim, psnr, lpip] 
+        print(i)
+        print(f"SSIM : {ssim_score.item():.4f}")
+        print(f"PSNR : {psnr_score.item():.4f}")
+        print(f"LPIPS: {lpips_score.item():.4f}")
 

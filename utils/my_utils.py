@@ -3,6 +3,7 @@ import gc
 import subprocess
 import matplotlib.pyplot as plt
 import os, shutil
+import numpy as np
 
 
 
@@ -64,3 +65,22 @@ class MyUtils :
                 raise FileExistsError(f"Destination exists: {dst_path}")
 
         shutil.copytree(src_path, dst_path)
+
+
+
+
+
+    @staticmethod
+    def save_arrays_to_npy(npy_path, iteration, array):
+        if os.path.exists(npy_path):
+            data = np.load(
+                npy_path,
+                allow_pickle=True
+            ).item()
+        else:
+            data = {}
+        data[iteration] = array
+        np.save(
+            npy_path,
+            data,
+            allow_pickle=True)

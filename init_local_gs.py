@@ -12,8 +12,11 @@ from utils.ibvs_tools import IbvsTools
 import pycolmap
 import os ,sys
 from moge.model.v2 import MoGeModel
+import numpy as np
 
-
+from skimage.metrics import structural_similarity as ssim
+import cv2
+import matplotlib.pyplot as plt
 
 # Add accelerated_features to our Python paths , so that when featx script gets executed it xill know where to find the modules
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -23,12 +26,13 @@ from modules.xfeat import XFeat
 
 
 
+
 # Main_tests path for shortcuts
-scene_name = "playroom"
+scene_name = "kitchen"
 case_nbr = 1
+CAM_W, CAM_H = 3115, 2076
 main_test_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test"
 case_test_path = f"{main_test_path}/{scene_name}/{scene_name}_case{case_nbr}"
-
 
 # GS1 paths
 gs1_sfm_path = f"{main_test_path}/{scene_name}/real_scene/sfm_{scene_name}"
@@ -40,23 +44,21 @@ des_imgs_path = f"{case_test_path}/desired_imgs"
 keyframes_path = f"{case_test_path}/keyframes"
 sfms_path = f"{case_test_path}/sfms"
 gs2s_dir_path = f"{case_test_path}/gs2s"
+moge_path = f"{case_test_path}/init_moges.ply"
+init_des_trans_npy_path = f"{case_test_path}/init_des_trans.npy"
+matches_frames_path = f"{case_test_path}/pre_des_ibvs_matches"
+des0_ibvs_infos_npy_path = f"{case_test_path}/des0_ibvs_infos.npy"  
+desGT_ibvs_infos_npy_path = f"{case_test_path}/desGT_ibvs_infos.npy"  
 
+# Metrics_path 
+des_masks_path = f"{des_imgs_path}/des_masks.npy"
+init_des_sim_path = f"{des_imgs_path}/init_des_sim.npy"
+all_des_sim_path = f"{des_imgs_path}/all_des_sim.npy"
 
-# Robot camera
-CAM_W, CAM_H = 1264, 832  
+# o3d Renderer
 FX = FY = 0.8 * max(CAM_W, CAM_H)
 f=1
 CX, CY = CAM_W / 2.0, CAM_H / 2.0
-
-
-intrins_gs1 = torch.tensor(
-    [[FX, 0.0, CX],
-        [0.0, FY, CY],
-        [0.0, 0.0, 1.0],],
-    dtype=torch.float32,
-    device="cuda",
-).unsqueeze(0)
-
 intrins_o3d = o3d.camera.PinholeCameraIntrinsic(
     width=CAM_W,
     height=CAM_H,
@@ -70,25 +72,55 @@ intrins_o3d = o3d.camera.PinholeCameraIntrinsic(
 # Some configs
 np.set_printoptions(precision=2, suppress=False)
 xfeat = XFeat()
-lambda_gain = 0.03
-dt = 0.03
 ibvs_nbr_features = 10
-gs_reso = 1
 moge_reso = 4
-max_ibvs_nbr_itrs = 100
-kf_motion_ratio = 0.1    # 5% of screen
-kf_motion_nbr_features = 100
+moge_model_reso_lvl = 5
+moge_depth_edge_threshold = 0.05
 
-
-
-# Starting states :
-des1_ready = True
-des1_aligned = True 
-des1_GT_ready = True
-init_imgs_ready = True
-manual_init_imgs = False
+# Starting states
+did_start = False
+des0_ready = False
+des0_aligned = False 
+des_GT_ready = False
+neighbour_imgs_ready = False
 sfm0_ready = False
-init_img_gs1_name = "DSC05590.jpg"
+ibvs_desGT_converge = False
+ibvs_des0_converge = False
+init_img_gs1_name = "DSCF5893.JPG"
+neighbour_imgs_name = ["DSCF5895.JPG", "DSCF5899.JPG", "DSCF5903.JPG", "DSCF5914.JPG", "DSCF5894.JPG", "DSCF5916.JPG"]
+init_img_gs2_name = "init_img.png"
+
+# IBVS Vars
+lambda_gain = 0.1
+dt_ibvs = 0.03
+ibvs_nbr_features = 10
+max_ibvs_nbr_itrs = 5000
+ibvs_pxl_error_conv = 0.02
+
+
+
+
+
+
+
+
+
+def get_xfeat_model():
+    global _xfeat
+    if _xfeat is None:
+        _xfeat = XFeat()
+    return _xfeat
+
+
+def get_xfeat_kpts(img) :
+    xfeat_model = get_xfeat_model()
+    tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+    tensor = tensor.unsqueeze(0)  # (1,3,H,W)
+    out = xfeat_model.detectAndCompute(tensor, top_k=2048)[0]
+    kpts = out['keypoints']
+    desc = out['descriptors']
+    return  kpts, desc
+
 
 
 
@@ -174,6 +206,8 @@ def render_mesh_pic(mesh, extrins):
     # ---------- Create visualizer ----------
     vis = o3d.visualization.Visualizer()
     vis.create_window(width=CAM_W, height=CAM_H, visible=False)
+    opt = vis.get_render_option()
+    opt.background_color = np.array([0.0, 0.0, 0.0])  # black
     vis.add_geometry(mesh)
 
 
@@ -295,72 +329,21 @@ def load_gaussians_from_ply(path, device="cuda"):
 
 
 
-def validate_keyframe(last_kf, curr_frame, xfeat,
-                      kf_motion_nbr_features=100,
-                      motion_thresh_ratio=0.03):
-    
-    # by default motion ration is 10% disp in img width
-
-    # 1. Match features
-    pts_last, pts_curr = xfeat.match_xfeat(last_kf, curr_frame)
-
-    # 2. Keep top matches
-    pts_last = pts_last[:kf_motion_nbr_features]
-    pts_curr = pts_curr[:kf_motion_nbr_features]
-
-    if len(pts_last) < 10:
-        return False
-
-    # 3. Compute pixel displacement(listof pxls disp)
-    disp = np.linalg.norm(pts_curr - pts_last, axis=1)
-
-    # 4. Robust score (median)
-    median_disp = np.median(disp)
-    #why median (example) : 
-    #pixels displacemnts = [2, 3, 5, 6, 100]
-    #mean = (2+3+5+6+100)/5 = 23.2  (weak against outliers)
-    #median = 5 (robuts to outliers)
-    
-
-    # 5. Normalize by image width // get how % the median pxls is in img_width
-    img_width = curr_frame.shape[1]
-    motion_ratio = median_disp / img_width
-
-    # 6. Decision
-    return motion_ratio > motion_thresh_ratio
 
 
-
-
-
-
-
-def get_init_kfs_from_dyna_ibvs_loop(gaussians, init_pose_gs1, last_keyframe_gs1, des_estim_img, max_ibvs_nbr_itrs = 5000, nbr_of_kfs = 2) :
+def dyna_ibvs(gaussians, intrins_gs1, init_pose_gs1, des_img, des_ibvs_infos_npy_path) :
 
     try: 
-
-        keyframes = []
         ibvs_tools = IbvsTools(CAM_W, CAM_H)    
         cur_pose_gs1 = init_pose_gs1
-        des_kpts, des_desc = ibvs_tools.get_xfeat_kpts(des_estim_img)
-        norm_of_error = pose_error = None
+        des_kpts, des_desc = ibvs_tools.get_xfeat_kpts(des_img)
+        norm_of_error = None
         i = 0
 
         for i in range(max_ibvs_nbr_itrs) :    
 
             # Render new cur_gs_pic and get its depthmap
             cur_gs1_img, cur_gs1_depth_map = GaussiansHandling.render_gs_pic(*gaussians, T=cur_pose_gs1, K=intrins_gs1, W=CAM_W, H=CAM_H)
-
-            # Check if it's a keyframe
-            if validate_keyframe(last_keyframe_gs1, cur_gs1_img, xfeat, kf_motion_nbr_features= kf_motion_nbr_features, motion_thresh_ratio = kf_motion_ratio) :
-                keyframes.append(cur_gs1_img)
-                print(f"Keyframe_{i} found")
-
-                last_keyframe_gs1 = cur_gs1_img
-
-                if len(keyframes) == nbr_of_kfs :
-                    return keyframes
-                
 
             # Match current_gs1 with des_estim using xfeat 
             cur_kpts, cur_desc = ibvs_tools.get_xfeat_kpts(cur_gs1_img)
@@ -384,6 +367,10 @@ def get_init_kfs_from_dyna_ibvs_loop(gaussians, init_pose_gs1, last_keyframe_gs1
             norm_of_error = np.linalg.norm(errors)
             print(f"IBVS iter {i} / 2D error : {norm_of_error}")
 
+            if norm_of_error < ibvs_pxl_error_conv :
+                print("converged !!")
+                break
+
             # 4 - Get the intr matrix & its pseudo_inv 
             L = ibvs_tools.get_interaction_matrix(len(matches_cur), Ss_cur, Ss_Z_cur, 1)
             L_psinv = ibvs_tools.get_inter_mat_pseudo_inverse(L)
@@ -392,16 +379,23 @@ def get_init_kfs_from_dyna_ibvs_loop(gaussians, init_pose_gs1, last_keyframe_gs1
             V = - lambda_gain * (L_psinv @ errors)  
            
             # 6 - Update cur_cam_pose and update visualization
-            cur_pose_gs1 = ibvs_tools.update_cam_pose(cur_pose_gs1, V, dt)
+            cur_pose_gs1 = ibvs_tools.update_cam_pose(cur_pose_gs1, V, dt_ibvs)
  
-        print("!!!!!! no keyframes found, ibvs is done")
-        return keyframes
+            # Save the infos of each ibvs iteration : 2d_err, condit_nbr, V, matches, pose_in_glbl_gs
+            ibvs_infos = [norm_of_error, LinAlgeb.get_mat_condition_number(L), V, [matches_cur, matches_des],cur_pose_gs1]
+            MyUtils.save_arrays_to_npy(des_ibvs_infos_npy_path, i, ibvs_infos)
+
+
+            if (i % 5) == 0 :
+                cur_mtch_gs_img = ImageHandling.draw_matches(matches_cur, matches_des, cur_gs1_img, des_img)
+                ImageHandling.save_img(cur_mtch_gs_img, i, matches_frames_path)   
+                MyUtils.cleanup()
+
 
 
     except KeyboardInterrupt:
             print("\nCtrl+C detected, exiting loop cleanly.")
             MyUtils.cleanup()
-            return keyframes
 
 
 
@@ -412,14 +406,42 @@ def get_init_kfs_from_dyna_ibvs_loop(gaussians, init_pose_gs1, last_keyframe_gs1
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#_______________________________________________________________________________________________________________________________________
 
 
 
 def main() :
 
+    # Make the folders
+    if not did_start :
+        os.mkdir(f"{case_test_path}/desired_imgs")
+        os.mkdir(f"{case_test_path}/gs2s")
+        os.mkdir(f"{case_test_path}/ibvs_frames")
+        os.mkdir(f"{case_test_path}/keyframes")
+        os.mkdir(f"{case_test_path}/sfms")
 
     moge_model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to("cuda")
-    
+     
     # Load gaussians1 & Get gs1 camera 
     gaussians1 = load_gaussians_from_ply(gs1_ply_path)
     recons1 = PosesHandling.get_recons(gs1_sfm_path)
@@ -430,76 +452,97 @@ def main() :
     init_img_pose_gs1 = PosesHandling.get_img_sfm_pose(recons1, init_img_gs1_name)
     init_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, init_img_pose_gs1, intrins_gs1, CAM_W, CAM_H)
     ImageHandling.save_img(init_img, "init_img", keyframes_path)
-    
-    
-    if not des1_ready : 
-        # Load moge_img from gs1_sfm
-        init_img = ImageHandling.load_np_img(f"{keyframes_path}/init_img.png")    
+    ImageHandling.save_img(init_img, "init_img", f"{sfms_path}/sfm0/images")
+
+                                              
+    if not des0_ready : 
+        
+        # !!!! Load moge_img from original gs1_sfm (for better quality)
+        init_img = ImageHandling.load_np_img(f"{gs1_sfm_path}/images/{init_img_gs1_name}")   
         
         # Apply Moge on it
-        masked_points, masked_colors, all_moge_points, all_moge_colors, moge_mask = GaussiansHandling.get_moge_points(init_img, model_reso_lvl = 1, use_fp16_bool = False) 
-        moge_points_o3d = MeshHandling.turn_points_to_o3d(masked_points, masked_colors) 
+        masked_points, masked_colors, all_moge_points, all_moge_colors, moge_mask = GaussiansHandling.get_moge_points(init_img, model_reso_lvl=moge_model_reso_lvl, depth_edge_threshold=moge_depth_edge_threshold, moge_model=moge_model, use_fp16_bool=False) 
+        moge_points_o3d = MeshHandling.turn_points_to_o3d(masked_points, masked_colors)
+        MeshHandling.save_o3dpcd(moge_points_o3d, moge_path) 
         
-        # get des1 from kf1 moge points
+        # manually render des0 from init_img moge points, save it to des_imgs and to sfm0
         moge_des_pose = get_cam_pose_from_mesh_view(moge_points_o3d)
-        des_estim_img, _ = render_mesh_pic(moge_points_o3d, moge_des_pose)
+        des_estim_img, depth = render_mesh_pic(moge_points_o3d, moge_des_pose)
         ImageHandling.save_img(des_estim_img, "des0", des_imgs_path)
-        ImageHandling.plot_2_imgs(init_img, des_estim_img)     
+        ImageHandling.save_img(des_estim_img, "des0", f"{sfms_path}/sfm0/images")
+        ImageHandling.plot_2_imgs(init_img, des_estim_img)    
+        
+        # getting des0 mask nd save it + saving the T we did
+        depth = np.asarray(depth)
+        mask = np.isfinite(depth) & (depth > 0) 
+        MyUtils.save_arrays_to_npy(des_masks_path, 0, mask)
+        MyUtils.save_arrays_to_npy(init_des_trans_npy_path, 0, moge_des_pose)
 
 
-    if not des1_aligned :
+
+    if not des0_aligned :
         # copy gs1_sfm and align des1 with it
         MyUtils.copy_any(gs1_sfm_path, gs1_sfm_aligned_path, overwrite=True)
         PosesHandling.align_new_image(f"{des_imgs_path}/des0.png", gs1_sfm_aligned_path)
     
 
-    if not des1_GT_ready :
+    if not des_GT_ready :
         # Render nd save des_GT  
         recons1_align = PosesHandling.get_recons(gs1_sfm_aligned_path)
         gt_des_pose = PosesHandling.get_img_sfm_pose(recons1_align, "des0.png")
         gt_des_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, gt_des_pose, intrins_gs1, CAM_W, CAM_H)
         des_estim_img = ImageHandling.load_np_img(f"{des_imgs_path}/des0.png")
         ImageHandling.save_img(gt_des_img, "GT_des", des_imgs_path)
+        print("GT des saved !")
+        ImageHandling.plot_2_imgs(des_estim_img, gt_des_img)
 
-    des_estim_img = ImageHandling.load_np_img(f"{des_imgs_path}/des0.png")
+        # getting des0 mask & save masked GT
+        des_masks_dict = np.load(des_masks_path, allow_pickle=True).item()
+        des0_mask = des_masks_dict[0]
+        gt_des_img_masked = gt_des_img.copy()
+        gt_des_img_masked[~des0_mask] = 0
+        ImageHandling.save_img(gt_des_img_masked, "gt_des_img_masked", des_imgs_path)
 
-    if not init_imgs_ready :
-        if manual_init_imgs :
-            # Make the square imgs and check them
-            mvmnt_length = 0.5
-            nghbr1_pose = init_img_pose_gs1 @ LinAlgeb.get_homog_frm_vect([mvmnt_length,0,0,0,0,0])
-            nghbr1_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, nghbr1_pose, intrins_gs1, CAM_W, CAM_H)
-            nghbr2_pose =  nghbr1_pose @ LinAlgeb.get_homog_frm_vect([0,mvmnt_length,0,0,0,0])
-            nghbr2_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, nghbr2_pose, intrins_gs1, CAM_W, CAM_H)
-            nghbr3_pose = nghbr2_pose @ LinAlgeb.get_homog_frm_vect([-mvmnt_length,0,0,0,0,0])
-            nghbr3_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, nghbr3_pose, intrins_gs1, CAM_W, CAM_H)
-            ImageHandling.plot_4_imgs(init_img, nghbr1_img, nghbr2_img, nghbr3_img)
-        else :
-            keyframes = get_init_kfs_from_dyna_ibvs_loop(gaussians1, init_img_pose_gs1, init_img, des_estim_img)
-            a = 0
-            for kf in keyframes :
-                a += 1
-                ImageHandling.save_img(kf, f"init_img_{a}", keyframes_path)
+
+    
+    if not ibvs_desGT_converge :
+        gt_des_img = ImageHandling.load_np_img(f"{des_imgs_path}/GT_des.png") 
+        dyna_ibvs(gaussians1, intrins_gs1, init_img_pose_gs1, gt_des_img, desGT_ibvs_infos_npy_path)
+
+
+
+    if not neighbour_imgs_ready :
+        i=0
+        for img_name in neighbour_imgs_name :
+            i+=1
+            img_pose = PosesHandling.get_img_sfm_pose(recons1, img_name)
+            img_gs1, _ = GaussiansHandling.render_gs_pic(*gaussians1, img_pose, intrins_gs1, CAM_W, CAM_H)
+            ImageHandling.save_img(img_gs1, f"nghbr_{i}", f"{sfms_path}/sfm0/images")
 
 
     if not sfm0_ready :
         # at this point I got to make sfm ready (onl sparse folder will be filled)
-        PosesHandling.apply_sfm_reconstruction(f"{sfms_path}/sfm0", sequential=False)
+        path = f"{sfms_path}/sfm0/sparse"
+        if not os.path.exists(path):
+            os.mkdir(path)
+        PosesHandling.apply_sfm_reconstruction(f"{sfms_path}/sfm0", sequential=True)
 
-
-
-
+        
+    if not ibvs_des0_converge :
+        des0_img = ImageHandling.load_np_img(f"{des_imgs_path}/des0.png") 
+        dyna_ibvs(gaussians1, intrins_gs1, init_img_pose_gs1, des0_img, des0_ibvs_infos_npy_path)
 
 
     # Get that initial img, get the moge we got from it
-    masked_points, masked_colors, all_moge_points, all_moge_colors, moge_mask = GaussiansHandling.get_moge_points(init_img, depth_edge_threshold=0.05, moge_model = moge_model, use_fp16_bool=False, model_reso_lvl=2)
+    masked_points, masked_colors, all_moge_points, all_moge_colors, moge_mask = GaussiansHandling.get_moge_points(init_img, model_reso_lvl = moge_model_reso_lvl, depth_edge_threshold=moge_depth_edge_threshold, moge_model=moge_model, use_fp16_bool = False)
     
     # Get txtr map from original kf
     _, txtr_mask = ImageHandling.compute_texturemap_and_mask(init_img, threshold=0.05)
     final_mask = moge_mask & txtr_mask    # update final mask with moge mask, cuz the pixels with inf 3d value should be avoide
+    
     # Get the sfm0 i just saved => get the 2d 3ds of initial_img 
     curr_recons2 = pycolmap.Reconstruction(f"{sfms_path}/sfm0/sparse/0")    
-    img_sfm_points_2d, img_sfm_points_3d = PosesHandling.get_2d_3d_points_of_img(curr_recons2, f"init_img.png")
+    img_sfm_points_2d, img_sfm_points_3d = PosesHandling.get_2d_3d_points_of_img(curr_recons2, init_img_gs2_name)
 
     img_sfm_points_3d_o3d = MeshHandling.turn_points_to_o3d(img_sfm_points_3d)
 
@@ -532,6 +575,10 @@ def main() :
 
     final_moge_points_o3d = MeshHandling.turn_points_to_o3d(final_moge_points, final_moge_colors)
     MeshHandling.visualize_scene([final_moge_points_o3d, img_sfm_points_3d_o3d])
+    mesh_handling = MeshHandling(CAM_W, CAM_H)
+    des_pose_gs2 = PosesHandling.get_img_sfm_pose(curr_recons2, "des0.png")
+    des_img_gs2, _ = mesh_handling.render_mesh_pic([final_moge_points_o3d], des_pose_gs2)
+    ImageHandling.plot_img(des_img_gs2)
 
     # Downsample, turn to gaussians, save
     final_moge_points = final_moge_points[::moge_reso]
@@ -546,3 +593,130 @@ def main() :
     
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""
+    img = ImageHandling.load_np_img("/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/thehouse/thehouse_case2/desired_imgs/des0.png")
+    white_mask = np.all(img >= 240, axis=-1)
+    img[white_mask] = 0
+    ImageHandling.save_img(img, "des0a.png", "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/thehouse/thehouse_case2/desired_imgs")
+    return
+"""
+
+
+
+"""
+
+    import os
+    from pathlib import Path
+    import cv2
+    import numpy as np
+    from skimage.metrics import structural_similarity as ssim
+
+    gs_plys = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/playroom/playroom_case1/gs2s"
+    sfm_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/playroom/playroom_case1/sfms/sfm1"
+    masks_folder = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/playroom/playroom_case1/desired_imgs/c"
+    gt_des_img = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/playroom/playroom_case1/desired_imgs/GT_des.png"
+
+    gray_gt = cv2.imread(gt_des_img, cv2.IMREAD_GRAYSCALE)
+    gt_des_img = ImageHandling.load_np_img(gt_des_img)
+
+    # get infos about the local-gs
+    recons_local = PosesHandling.get_recons(sfm_path)
+    K = PosesHandling.get_cam_matrix(recons_local)
+    intrins_local = GaussiansHandling.turn_cam_matrix_to_gsplat_format(K)
+    print("got infos about the local-gs")    
+
+    # get infos about des-img pose
+    des_new_pose = PosesHandling.get_img_sfm_pose(recons_local, "des0.png")
+    
+    
+
+    for i in range(48) :
+        gaussians = GaussiansHandling.load_gaussians_from_ply(f"{gs_plys}/gs2_{i}.ply")
+        des_render, depth = GaussiansHandling.render_gs_pic(*gaussians, des_new_pose, intrins_local, CAM_W, CAM_H)
+        mask = depth > 1e-6
+        mask_img = (mask * 255).astype(np.uint8)
+        gray_des = cv2.cvtColor(des_render, cv2.COLOR_RGB2GRAY)
+
+        coverage_perc = 100.0 * mask.mean()
+        print(f"Coverage_ {i}: {coverage_perc:.2f}%")
+
+        score, ssim_map = ssim(
+        gray_des,
+        gray_gt,
+        data_range=255,
+        full=True)
+
+        masked_score = ssim_map[mask].mean()
+        masked_score = ssim_map.mean()
+        print(f"SSIM {i}:", masked_score)    
+        gray_des = (gray_des * 255).clip(0, 255).astype(np.uint8)
+    
+        diff = ImageHandling.compute_grayscale_difference(gray_gt, gray_des)
+        score = diff.mean()
+        print(f"pixel diff {i}: {score}")
+
+    return
+
+"""
+
+
+
+
+
+
+
+
+
+
+"""
+    if not init_imgs_ready :
+        if manual_init_imgs :
+            # Make the square imgs and check them
+            mvmnt_length = 0.5
+            nghbr1_pose = init_img_pose_gs1 @ LinAlgeb.get_homog_frm_vect([mvmnt_length,0,0,0,0,0])
+            nghbr1_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, nghbr1_pose, intrins_gs1, CAM_W, CAM_H)
+            nghbr2_pose =  nghbr1_pose @ LinAlgeb.get_homog_frm_vect([0,mvmnt_length,0,0,0,0])
+            nghbr2_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, nghbr2_pose, intrins_gs1, CAM_W, CAM_H)
+            nghbr3_pose = nghbr2_pose @ LinAlgeb.get_homog_frm_vect([-mvmnt_length,0,0,0,0,0])
+            nghbr3_img, _ = GaussiansHandling.render_gs_pic(*gaussians1, nghbr3_pose, intrins_gs1, CAM_W, CAM_H)
+            ImageHandling.plot_4_imgs(init_img, nghbr1_img, nghbr2_img, nghbr3_img)
+        else :
+            keyframes = get_init_kfs_from_dyna_ibvs_loop(gaussians1, init_img_pose_gs1, init_img, des_estim_img)
+            a = 0
+            for kf in keyframes :
+                a += 1
+                ImageHandling.save_img(kf, f"init_img_{a}", keyframes_path)
+"""
+    
+
+
+

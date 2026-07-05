@@ -22,7 +22,7 @@ class GaussiansHandling :
 
 
     @staticmethod
-    def run_gs_training(sfm_path, output_path, gs_reso, gs_nbr_itrs):
+    def run_gs_training(sfm_path, output_path, gs_reso = 1, gs_nbr_itrs = 15000):
         
         import sys, os
         # gaussian_splatting/ is a sibling of scripts/
@@ -79,7 +79,7 @@ class GaussiansHandling :
     def turn_points_to_gaussians(
         xyz,
         rgb,
-        scale=0.05,
+        scale=0.025,
         alpha=0.09,
         device="cuda",
     ):
@@ -447,6 +447,20 @@ class GaussiansHandling :
 
 
 
+
+    @staticmethod
+    def get_gsinria_tensor_frm_img_path(img_path):
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        img = torch.from_numpy(img).float() / 255.0
+
+        gs_img_tensor = (
+            img.permute(2,0,1)
+            .unsqueeze(0)
+            .contiguous())
+
+        return gs_img_tensor
 
 
 

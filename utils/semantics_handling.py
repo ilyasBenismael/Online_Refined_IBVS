@@ -12,7 +12,6 @@ import open3d as o3d
 import torch
 from PIL import Image
 
-"""
 import groundingdino.datasets.transforms as T
 from groundingdino.models import build_model
 from groundingdino.util.slconfig import SLConfig
@@ -26,7 +25,7 @@ import sys
 sys.path.append("/home/user/sam2/")
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-"""
+
 
 
 
