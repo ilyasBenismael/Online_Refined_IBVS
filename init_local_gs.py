@@ -13,6 +13,7 @@ import pycolmap
 import os ,sys
 from moge.model.v2 import MoGeModel
 import numpy as np
+from pathlib import Path
 
 from skimage.metrics import structural_similarity as ssim
 import cv2
@@ -25,12 +26,10 @@ from modules.xfeat import XFeat
 
 
 
-
-
 # Main_tests path for shortcuts
-scene_name = "kitchen"
-case_nbr = 1
-CAM_W, CAM_H = 3115, 2076
+scene_name = "thehouse"
+case_nbr = 3
+CAM_W, CAM_H = 1332, 876
 main_test_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test"
 case_test_path = f"{main_test_path}/{scene_name}/{scene_name}_case{case_nbr}"
 
@@ -38,6 +37,7 @@ case_test_path = f"{main_test_path}/{scene_name}/{scene_name}_case{case_nbr}"
 gs1_sfm_path = f"{main_test_path}/{scene_name}/real_scene/sfm_{scene_name}"
 gs1_ply_path = f"{main_test_path}/{scene_name}/real_scene/{scene_name}.ply"
 gs1_sfm_aligned_path = f"{case_test_path}/gs1_sfm_aligned"
+configs_path = f"{case_test_path}/configs.txt"
 
 # All States to be saved, paths
 des_imgs_path = f"{case_test_path}/desired_imgs"
@@ -69,26 +69,21 @@ intrins_o3d = o3d.camera.PinholeCameraIntrinsic(
 )
 
 
-# Some configs
-np.set_printoptions(precision=2, suppress=False)
-xfeat = XFeat()
-ibvs_nbr_features = 10
-moge_reso = 4
-moge_model_reso_lvl = 5
-moge_depth_edge_threshold = 0.05
-
 # Starting states
-did_start = False
+did_start = True
+trans_exist = True
 des0_ready = False
 des0_aligned = False 
-des_GT_ready = False
+des_GT_ready = True
+ibvs_desGT_converge = True
+ibvs_des0_converge = True
 neighbour_imgs_ready = False
 sfm0_ready = False
-ibvs_desGT_converge = False
-ibvs_des0_converge = False
-init_img_gs1_name = "DSCF5893.JPG"
-neighbour_imgs_name = ["DSCF5895.JPG", "DSCF5899.JPG", "DSCF5903.JPG", "DSCF5914.JPG", "DSCF5894.JPG", "DSCF5916.JPG"]
 init_img_gs2_name = "init_img.png"
+get_des_frm_gs = True
+
+init_img_gs1_name = "IMG_6393.jpg"
+neighbour_imgs_name = ["IMG_6299.jpg", "IMG_6300.jpg", "IMG_6379.jpg", "IMG_6380.jpg", "IMG_6394.jpg", "IMG_6403.jpg", "IMG_6453.jpg", "IMG_6460.jpg", "IMG_6461.jpg", "IMG_6475.jpg", "IMG_6506.jpg", "IMG_6507.jpg"]
 
 # IBVS Vars
 lambda_gain = 0.1
@@ -98,6 +93,39 @@ max_ibvs_nbr_itrs = 5000
 ibvs_pxl_error_conv = 0.02
 
 
+# Some configs
+np.set_printoptions(precision=2, suppress=False)
+xfeat = XFeat()
+ibvs_nbr_features = 10
+moge_reso = 4
+moge_model_reso_lvl = 1
+moge_depth_edge_threshold = 0.01
+
+
+
+
+def write_init_config_txt(configs_path) :
+    
+    # Path where you want to save the file
+    txt_path = Path(configs_path)
+
+    with open(txt_path, "w") as f:
+        f.write("____ initial configs ____\n\n")
+
+        f.write(f"init_img_gs1_name = {init_img_gs1_name}\n")
+        f.write(f"neighbour_imgs_name = {neighbour_imgs_name}\n\n")
+
+        f.write("# IBVS Vars\n")
+        f.write(f"lambda_gain = {lambda_gain}\n")
+        f.write(f"dt_ibvs = {dt_ibvs}\n")
+        f.write(f"ibvs_nbr_features = {ibvs_nbr_features}\n")
+        f.write(f"max_ibvs_nbr_itrs = {max_ibvs_nbr_itrs}\n")
+        f.write(f"ibvs_pxl_error_conv = {ibvs_pxl_error_conv}\n\n")
+
+        f.write("# Some configs\n")
+        f.write(f"moge_reso = {moge_reso}\n")
+        f.write(f"moge_model_reso_lvl = {moge_model_reso_lvl}\n")
+        f.write(f"moge_depth_edge_threshold = {moge_depth_edge_threshold}\n")
 
 
 
@@ -432,6 +460,10 @@ def dyna_ibvs(gaussians, intrins_gs1, init_pose_gs1, des_img, des_ibvs_infos_npy
 
 def main() :
 
+    sfm_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/train/real_scene/sfm_train"
+    PosesHandling.apply_sfm_reconstruction(sfm_path, True)
+    return
+
     # Make the folders
     if not did_start :
         os.mkdir(f"{case_test_path}/desired_imgs")
@@ -439,6 +471,7 @@ def main() :
         os.mkdir(f"{case_test_path}/ibvs_frames")
         os.mkdir(f"{case_test_path}/keyframes")
         os.mkdir(f"{case_test_path}/sfms")
+        write_init_config_txt(configs_path)
 
     moge_model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to("cuda")
      
@@ -454,19 +487,27 @@ def main() :
     ImageHandling.save_img(init_img, "init_img", keyframes_path)
     ImageHandling.save_img(init_img, "init_img", f"{sfms_path}/sfm0/images")
 
-                                              
+
+    # Load moge_img from original gs1_sfm (for better quality)
+    if not get_des_frm_gs : 
+        init_img = ImageHandling.load_np_img(f"{gs1_sfm_path}/images/{init_img_gs1_name}")
+           
+
     if not des0_ready : 
-        
-        # !!!! Load moge_img from original gs1_sfm (for better quality)
-        init_img = ImageHandling.load_np_img(f"{gs1_sfm_path}/images/{init_img_gs1_name}")   
-        
+ 
         # Apply Moge on it
         masked_points, masked_colors, all_moge_points, all_moge_colors, moge_mask = GaussiansHandling.get_moge_points(init_img, model_reso_lvl=moge_model_reso_lvl, depth_edge_threshold=moge_depth_edge_threshold, moge_model=moge_model, use_fp16_bool=False) 
         moge_points_o3d = MeshHandling.turn_points_to_o3d(masked_points, masked_colors)
         MeshHandling.save_o3dpcd(moge_points_o3d, moge_path) 
         
-        # manually render des0 from init_img moge points, save it to des_imgs and to sfm0
-        moge_des_pose = get_cam_pose_from_mesh_view(moge_points_o3d)
+        # Manually render des0 from init_img moge points, save it to des_imgs and to sfm0 || or load an already saved trans
+        if trans_exist :
+            trans_data = np.load(init_des_trans_npy_path, allow_pickle=True)
+            trans_dict = trans_data.item()
+            moge_des_pose = trans_dict[0]
+        else :
+            moge_des_pose = get_cam_pose_from_mesh_view(moge_points_o3d)
+
         des_estim_img, depth = render_mesh_pic(moge_points_o3d, moge_des_pose)
         ImageHandling.save_img(des_estim_img, "des0", des_imgs_path)
         ImageHandling.save_img(des_estim_img, "des0", f"{sfms_path}/sfm0/images")
@@ -477,7 +518,6 @@ def main() :
         mask = np.isfinite(depth) & (depth > 0) 
         MyUtils.save_arrays_to_npy(des_masks_path, 0, mask)
         MyUtils.save_arrays_to_npy(init_des_trans_npy_path, 0, moge_des_pose)
-
 
 
     if not des0_aligned :
@@ -510,6 +550,13 @@ def main() :
         dyna_ibvs(gaussians1, intrins_gs1, init_img_pose_gs1, gt_des_img, desGT_ibvs_infos_npy_path)
 
 
+    if not ibvs_des0_converge :
+        des0_img = ImageHandling.load_np_img(f"{des_imgs_path}/des0.png") 
+        dyna_ibvs(gaussians1, intrins_gs1, init_img_pose_gs1, des0_img, des0_ibvs_infos_npy_path)
+
+
+
+  
 
     if not neighbour_imgs_ready :
         i=0
@@ -527,10 +574,6 @@ def main() :
             os.mkdir(path)
         PosesHandling.apply_sfm_reconstruction(f"{sfms_path}/sfm0", sequential=True)
 
-        
-    if not ibvs_des0_converge :
-        des0_img = ImageHandling.load_np_img(f"{des_imgs_path}/des0.png") 
-        dyna_ibvs(gaussians1, intrins_gs1, init_img_pose_gs1, des0_img, des0_ibvs_infos_npy_path)
 
 
     # Get that initial img, get the moge we got from it
@@ -584,11 +627,9 @@ def main() :
     final_moge_points = final_moge_points[::moge_reso]
     final_moge_colors = final_moge_colors[::moge_reso]
 
-    new_gaussians = GaussiansHandling.turn_points_to_gaussians(final_moge_points, final_moge_colors)
+    new_gaussians = GaussiansHandling.turn_points_to_gaussians(final_moge_points, final_moge_colors, scale=0.03)
     GaussiansHandling.turn_gaussians_to_ply(new_gaussians, f"{gs2s_dir_path}/gs2_0.ply")
     print(f"[Output] Saved gs2_0.ply to {gs2s_dir_path}")
-
-
 
     
 if __name__ == "__main__":

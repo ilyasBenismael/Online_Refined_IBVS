@@ -20,7 +20,6 @@ class PosesHandling :
 
 
 
-
     @staticmethod
     def create_sfm_structure(root_path, sfm_name):
         sfm_path = os.path.join(root_path, sfm_name)
@@ -119,7 +118,8 @@ class PosesHandling :
             f"--image_path {images_path} "
             f"--ImageReader.camera_model PINHOLE "
             f"--ImageReader.single_camera 1 "
-            f"--FeatureExtraction.use_gpu 1"
+            f"--FeatureExtraction.use_gpu 1 "
+            f"--SiftExtraction.max_image_size 1500 "
         )
 
         # 3. Sequential matching
@@ -147,7 +147,7 @@ class PosesHandling :
 
 
     @staticmethod
-    def align_new_image(new_image_path, sfm_path):
+    def align_new_image(new_image_path, sfm_path, sequential = False):
                 
         # the img path 
         new_image_name = os.path.basename(new_image_path)
@@ -177,17 +177,22 @@ class PosesHandling :
             f"--image_list_path {new_imgs_txt} "
             f"--ImageReader.existing_camera_id 1 "
             f"--FeatureExtraction.use_gpu 1 "
-            f"--SiftExtraction.max_num_features 1500 "
+            f"--SiftExtraction.max_image_size 1500"
         )
         MyUtils.run_cmd(cmd)
 
+
         # Matching
-        cmd = (
-            f"colmap exhaustive_matcher "
+        matcher = "sequential"
+        if not sequential :
+            matcher = "exhaustive"
+        
+        MyUtils.run_cmd(
+            f"colmap {matcher}_matcher "
             f"--database_path {db_path} "
             f"--FeatureMatching.use_gpu 1"
         )
-        MyUtils.run_cmd(cmd)
+
 
         # Registration
         cmd = (

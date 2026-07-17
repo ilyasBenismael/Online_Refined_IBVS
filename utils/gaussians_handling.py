@@ -8,10 +8,7 @@ from moge.model.v2 import MoGeModel
 import utils3d 
 import cv2
 import subprocess
-
 import time
-from utils.image_handling import ImageHandling
-
 
 
 
@@ -449,19 +446,22 @@ class GaussiansHandling :
 
 
     @staticmethod
-    def get_gsinria_tensor_frm_img_path(img_path):
-        img = cv2.imread(img_path)
+    def get_gsinria_tensor_from_img(img):
+        """
+        Convert a NumPy image (BGR, as returned by cv2.imread or OpenCV)
+        to the tensor format expected by Gaussian Splatting.
+        """
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         img = torch.from_numpy(img).float() / 255.0
 
         gs_img_tensor = (
-            img.permute(2,0,1)
+            img.permute(2, 0, 1)
             .unsqueeze(0)
-            .contiguous())
+            .contiguous()
+        )
 
         return gs_img_tensor
-
 
 
 

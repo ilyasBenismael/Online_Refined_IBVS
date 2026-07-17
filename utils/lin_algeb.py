@@ -113,6 +113,33 @@ class LinAlgeb :
 
 
 
+    
+    @staticmethod
+    def pose_distance(T1, T2):
+        """
+        Compute Euclidean distance between two vectors
+        """
+        return np.linalg.norm(T2 - T1)
+    
+    
+    @staticmethod
+    def normalize_t(t_diff: float, t_norm: float) -> float:
+        """Normalize a translation dist by another one"""
+        if t_norm == 0 or np.isnan(t_norm):
+            return float("nan")
+        return t_diff / t_norm
+
+    @staticmethod
+    def rotation_diff(R_gt: np.ndarray, R_other: np.ndarray) -> float:
+        """Angle (in degrees) between two rotation matrices."""
+        R_rel = R_gt.T @ R_other
+        cos_angle = (np.trace(R_rel) - 1.0) / 2.0
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)
+        angle_rad = np.arccos(cos_angle)
+        return float(np.degrees(angle_rad))
+
+
+
     @staticmethod
     def inverse_mat(pose_mat) :
         return np.linalg.inv(pose_mat)
@@ -227,12 +254,3 @@ class LinAlgeb :
     
 
 
-    
-    @staticmethod
-    def pose_distance(T1, T2):
-        """
-        Compute Euclidean distance between two homogeneous pose matrices.
-        """
-        p1 = T1[:3, 3]  # translation of first pose
-        p2 = T2[:3, 3]  # translation of second pose
-        return np.linalg.norm(p2 - p1)

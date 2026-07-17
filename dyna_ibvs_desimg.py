@@ -32,13 +32,29 @@ from modules.xfeat import XFeat
 
 
 
+# Robot camera______________________________________________________
+CAM_W, CAM_H = 1332, 876
+
+
+# IBVS Vars_________________________________________________________
+lambda_gain = 0.1
+dt_ibvs = 0.03
+ibvs_nbr_features = 10
+gs_reso = 2
+moge_reso = 4
+max_ibvs_nbr_itrs = 100
+kf_motion_ratio = 0.03    # 3% of screen
+kf_motion_nbr_features = 100
+ibvs_pxl_error_conv = 0.02
+ibvs_pxl_error_kf = 0.05
+gs_nbr_itrs = 50
 
 
 # Paths___________________________________________________________
 
 # Main_tests path for shortcuts
-scene_name = "kitchen"
-case_nbr = 1
+scene_name = "thehouse"
+case_nbr = 3
 main_test_path = "my_results/online_ibvs_test"
 case_test_path = f"{main_test_path}/{scene_name}/{scene_name}_case{case_nbr}"
 
@@ -48,11 +64,11 @@ results_txt_file = f"{case_test_path}/results.txt"
 ibvs_infos_npy_path = f"{case_test_path}/ibvs_infos.npy"
 des_depths_npy_path = f"{case_test_path}/des_depths.npy"
 ibvs_frame_depths_npy_path = f"{case_test_path}/ibvs_frame_depths.npy"
+config_txt_path = f"{case_test_path}/configs.txt"
 
 
 # GS_inria_path for training
 gs_inria_path = "gaussian_splatting2"
-gs_nbr_itrs = 50
 inria_saved_ply_path = f"{case_test_path}/gs2s/inria_output/point_cloud/iteration_{gs_nbr_itrs}/point_cloud.ply"
 
 
@@ -69,7 +85,7 @@ real_frames_path = f"{case_test_path}/ibvs_frames/real_frames"
 matches_frames_path = f"{case_test_path}/ibvs_frames/matches_frames"
 
 # init & des imgs info
-init_img_name_sfm1 = "DSCF5893.JPG"
+init_img_name_sfm1 = "IMG_6393.jpg"
 des_img_name_sfm1 = des_img_name_sfm_gs2 = gt_des_name = "des0.png"
 
 
@@ -78,21 +94,41 @@ np.set_printoptions(precision=8, suppress=False)
 _xfeat = None
 
 
-# Robot camera______________________________________________________
-CAM_W, CAM_H =  3115, 2076
 
 
-# IBVS Vars_________________________________________________________
-lambda_gain = 0.1
-dt_ibvs = 0.03
-ibvs_nbr_features = 10
-gs_reso = 1
-moge_reso = 4
-max_ibvs_nbr_itrs = 100
-kf_motion_ratio = 0.03    # 3% of screen
-kf_motion_nbr_features = 100
-ibvs_pxl_error_conv = 0.02
-ibvs_pxl_error_kf = 0.05
+
+
+
+
+
+
+
+
+
+
+
+def type_confis_on_txt(config_txt_path) :
+    with open(config_txt_path, "a") as f:
+        f.write("\n\n# Main configs________________________________________________\n")
+        f.write("\n\n# Robot camera___________\n")
+        f.write(f"CAM_W = {CAM_W}\n")
+        f.write(f"CAM_H = {CAM_H}\n\n")
+
+        f.write("# IBVS Vars__________________\n")
+        f.write(f"lambda_gain = {lambda_gain}\n")
+        f.write(f"dt_ibvs = {dt_ibvs}\n")
+        f.write(f"ibvs_nbr_features = {ibvs_nbr_features}\n")
+        f.write(f"gs_reso = {gs_reso}\n")
+        f.write(f"moge_reso = {moge_reso}\n")
+        f.write(f"max_ibvs_nbr_itrs = {max_ibvs_nbr_itrs}\n")
+        f.write(f"kf_motion_ratio = {kf_motion_ratio}\n")
+        f.write(f"kf_motion_nbr_features = {kf_motion_nbr_features}\n")
+        f.write(f"ibvs_pxl_error_conv = {ibvs_pxl_error_conv}\n")
+        f.write(f"ibvs_pxl_error_kf = {ibvs_pxl_error_kf}\n")
+        f.write(f"gs_nbr_itrs = {gs_nbr_itrs}\n")
+
+
+
 
 
 
@@ -441,9 +477,6 @@ def log_to_table(message: str, source: str, dt: float, file_path: str = results_
 
 
 
-
-
-
 def dyna_ibvs_loop(shared, kf_queue, des_img_queue, kf_event, gs1_ply_path, init_pose_gs1, gt_des_pose_gs1, init_keyframe, des_img) :
 
     try:
@@ -542,7 +575,7 @@ def dyna_ibvs_loop(shared, kf_queue, des_img_queue, kf_event, gs1_ply_path, init
                 msg = f"🔵🔵{i}-Last kf found"; print(msg)
                 log_to_table(msg, 'ibvs', 0)
 
-            # Save the infos of each ibvs iteration : 2d_err, 3d_err, condit_nbr, V, matches, pose_in_glbl_gs
+            # Save the infos of each ibvs iteration : 2d_err, 3d_err, condit_nbr, V, matches, homog_pose_in_gs1
             ibvs_infos = [pxl_error, pose_error, LinAlgeb.get_mat_condition_number(L), V, [matches_cur, matches_des],cur_pose_gs1]
             MyUtils.save_arrays_to_npy(ibvs_infos_npy_path, i, ibvs_infos)
 
@@ -685,7 +718,7 @@ def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
                 # Downsample, Turn points to gaussians, merge with old ones
                 final_moge_points = final_moge_points[::moge_reso]
                 final_moge_colors = final_moge_colors[::moge_reso]
-                new_gaussians = GaussiansHandling.turn_points_to_gaussians(final_moge_points, final_moge_colors)
+                new_gaussians = GaussiansHandling.turn_points_to_gaussians(final_moge_points, final_moge_colors, scale=0.03)
                 new_gaussians = GaussiansHandling.merge_2_gaussians(last_gaussians2, new_gaussians)
                 msg = f"🟢{i}-Turn points to gaussians, KF({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s"); _t = time.time()
                 log_to_table(msg, 'gs', dt)
@@ -741,7 +774,7 @@ def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
 
 def main() :
 
-
+    type_confis_on_txt(config_txt_path)
     # Start multi-process elements  // we can use fork or spawn (fork is faster and works on ubuntu)
     ctx = mp.get_context("spawn")
     manager = ctx.Manager()
@@ -771,6 +804,8 @@ def main() :
     p2.join()
 
     return
+
+
 
 
 

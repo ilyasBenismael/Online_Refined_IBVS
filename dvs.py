@@ -1,73 +1,17 @@
-
 import os
-import open3d as o3d
 import numpy as np
 from utils.lin_algeb import LinAlgeb
-import matplotlib.pyplot as plt
 import math
 from utils.image_handling import ImageHandling
 from utils.gaussians_handling import GaussiansHandling
 import torch
 from utils.poses_handling import PosesHandling
 from utils.my_utils import MyUtils
-import pycolmap
-from moge.model.v2 import MoGeModel
-import time, path
-
-
-
-
-
-"""
-from pathlib import Path
-import shutil
-
-input_dir = Path("/home/user/Bureau/visual_navigation/IBVS_CODE/datasets/360_v2/room/images_2")
-output_dir = Path("/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/room2/sfm/images")
-output_dir.mkdir(exist_ok=True)
-
-images = sorted(
-    [p for p in input_dir.iterdir()
-     if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}]
-)
-
-# Keep 2 out of every 5 images
-for i, img_path in enumerate(images):
-    if i % 5 in (0, 1):
-        shutil.copy2(img_path, output_dir / img_path.name)
-
-print(f"Copied {len(list(output_dir.iterdir()))} images")
-
-
-"""
-
-sfm_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/tree/sfm"
-inria_output = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/garden/inria"
-     
-PosesHandling.apply_sfm_reconstruction(sfm_path, False)
-#GaussiansHandling.run_gs_training(sfm_path=sfm_path, output_path= inria_output, gs_reso = 4)
-
-
-
-"""
-
 import os
-import open3d as o3d
-import numpy as np
-from utils.lin_algeb import LinAlgeb
-import matplotlib.pyplot as plt
-import math
-from utils.image_handling import ImageHandling
-from utils.gaussians_handling import GaussiansHandling
-import torch
-from utils.poses_handling import PosesHandling
-from utils.my_utils import MyUtils
-import pycolmap
-from moge.model.v2 import MoGeModel
-import time
-
-
-
+import glob
+import re
+import cv2
+from datetime import datetime
 
 
 
@@ -75,10 +19,10 @@ import time
 
 # Main_tests path for shortcuts
 scene_name = "thehouse"
-case_nbr = 2
+case_nbr = 3
 main_test_path = "my_results/online_ibvs_test"
 case_test_path = f"{main_test_path}/{scene_name}/{scene_name}_case{case_nbr}"
-
+gs1_sfm_path = f"{main_test_path}/{scene_name}/real_scene/sfm_{scene_name}"
 
 # GS1 paths
 gs1_ply_path = f"{main_test_path}/{scene_name}/real_scene/{scene_name}.ply"
@@ -86,24 +30,21 @@ gs1_ply_path = f"{main_test_path}/{scene_name}/real_scene/{scene_name}.ply"
 # All States to be saved, paths
 des_imgs_path = f"{case_test_path}/desired_imgs"
 real_frames_path = f"{case_test_path}/ibvs_frames/real_frames"  
-
+ibvs_infos_npy_path = f"{case_test_path}/ibvs_infos.npy"
+dvs_infos_npy_path = f"{case_test_path}/dvs_infos.npy"
 
 
 # Robot camera______________________________________________________
 CAM_W, CAM_H = 1332, 876
-FX = FY = 0.8 * max(CAM_W, CAM_H)
+recons1 = PosesHandling.get_recons(gs1_sfm_path)
+K = PosesHandling.get_cam_matrix(recons1)
+FX = K[0, 0]
+FY = K[1, 1]
+CX = K[0, 2]
+CY = K[1, 2]
 f=1
-CX, CY = CAM_W / 2.0, CAM_H / 2.0
+intrins_gs1 = GaussiansHandling.turn_cam_matrix_to_gsplat_format(K)
 
-
-
-intrins_gs1 = torch.tensor(
-    [[FX, 0.0, CX],
-        [0.0, FY, CY],
-        [0.0, 0.0, 1.0],],
-    dtype=torch.float32,
-    device="cuda",
-).unsqueeze(0)
 
 
 # DVS Vars_________________________________________________________
@@ -113,10 +54,20 @@ lamda = 1
 
 
 
+def load_last_des_img(desimg_folder):
+    candidates = []
 
+    for f in glob.glob(os.path.join(desimg_folder, "des*.png")):
+        name = os.path.basename(f)
+        m = re.fullmatch(r"des(\d+)\.png", name)
+        if m:
+            candidates.append((int(m.group(1)), f))
 
+    if not candidates:
+        raise FileNotFoundError("No des<number>.png images found.")
 
-
+    _, last_img_path = max(candidates)
+    return cv2.imread(last_img_path)
 
 
 
@@ -168,11 +119,6 @@ def update_cam_pose(cam_homog, Vc, dt):
      new_T[:3, 3] = t_new
      
      return new_T
-
-
-
-
-
 
 
 
@@ -277,6 +223,11 @@ def start_dvs_loop(gaussians, init_gs1_pose, des_img) :
    
             # 5 - Update camera pose & update matplotlib vis data
             cur_pose = update_cam_pose(cur_pose, V, dt)
+
+            # save infos
+            current_time = datetime.now().strftime("%H:%M:%S")
+            dvs_infos = [cost, cur_pose, current_time]
+            MyUtils.save_arrays_to_npy(dvs_infos_npy_path, i, dvs_infos)
  
 
     except KeyboardInterrupt:
@@ -290,25 +241,38 @@ def start_dvs_loop(gaussians, init_gs1_pose, des_img) :
 
 
 
+def get_last_ibvs_pose(threshold):
+    data = np.load(ibvs_infos_npy_path, allow_pickle=True).item()
 
+    iterations = sorted(data.keys())
+
+    for k in range(len(iterations) - 2):
+        i1, i2, i3 = iterations[k:k+3]
+
+        e1 = data[i1][0]
+        e2 = data[i2][0]
+        e3 = data[i3][0]
+
+        if e1 < threshold and e2 < threshold and e3 < threshold:
+            print("Selected iteration:", i1)
+            print(f"Pixel errors: {e1:.3f}, {e2:.3f}, {e3:.3f}")
+            return data[i1][5]
+
+    raise ValueError(
+        f"No three consecutive iterations with pxl_error < {threshold} found."
+    )
 
 
 
 
 def main() :
 
-    init_pose = np.array([
-    [0.08970551, -0.42680273,  0.89988463,  1.46558079],
-    [0.99596655,  0.03672936, -0.08186327, -0.7019205 ],
-    [ 0.00188728,  0.90359857,  0.42837607,  0.16063543],
-    [ 0.     ,     0.    ,      0.    ,      1.        ]])
-    
-
+    last_pose_gs1 = get_last_ibvs_pose(0.1)
+    print(f"Last pose GS1: {last_pose_gs1}")
+    init_pose = last_pose_gs1
     gaussians = GaussiansHandling.load_gaussians_from_ply(gs1_ply_path)                                                                                     
-    des_img = ImageHandling.load_np_img(f"{des_imgs_path}/des101.png")
+    des_img = load_last_des_img(des_imgs_path)
     start_dvs_loop(gaussians, init_pose, des_img)
-
-
 
 
 
@@ -325,7 +289,4 @@ if __name__ == "__main__":
 
         
 
-
-
-"""
 

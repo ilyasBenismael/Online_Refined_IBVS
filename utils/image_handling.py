@@ -5,6 +5,8 @@ from PIL import Image
 import os, io
 import sys
 from pathlib import Path
+from utils.gaussians_handling import GaussiansHandling
+
 
 # Path to IBVS_CODE
 project_root = Path(__file__).resolve().parents[2]
@@ -322,11 +324,11 @@ class ImageHandling :
 
     @staticmethod
     def calc_imgs_sim_metrics(img1, img2, i, mask = False) :
-        if mask :
-            
+        if mask :      
             # apply mask on both img1 and img2 and 
             pass
-        
+        img1 = GaussiansHandling.get_gsinria_tensor_from_img(img1)
+        img2 = GaussiansHandling.get_gsinria_tensor_from_img(img2)
         ssim_score = ssim(img1, img2)
         psnr_score = psnr(img1, img2)
         lpips_score = lpips(img1, img2, net_type='vgg')
@@ -335,4 +337,6 @@ class ImageHandling :
         print(f"SSIM : {ssim_score.item():.4f}")
         print(f"PSNR : {psnr_score.item():.4f}")
         print(f"LPIPS: {lpips_score.item():.4f}")
+
+        return ssim_score.item(), psnr_score.item(), lpips_score.item()
 
