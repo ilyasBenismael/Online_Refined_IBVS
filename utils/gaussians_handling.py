@@ -390,7 +390,7 @@ class GaussiansHandling :
 
 
     @staticmethod
-    def get_moge_points(img, reso_div = None, model_reso_lvl = 8, use_fp16_bool = True, depth_edge_threshold=0.005, moge_model = None):
+    def get_moge_points(img, fov_x, reso_div = None, model_reso_lvl = 8, use_fp16_bool = True, depth_edge_threshold=0.005, moge_model = None):
         
         t0 = time.time()
         if reso_div is not None :
@@ -413,9 +413,8 @@ class GaussiansHandling :
         # turn img to torch and apply moge
         image = torch.from_numpy(img).float().to("cuda").permute(2, 0, 1)
         t0 = time.time()
-        output = moge_model.infer(image, resolution_level=model_reso_lvl, use_fp16=use_fp16_bool)
+        output = moge_model.infer(image, resolution_level=model_reso_lvl, use_fp16=use_fp16_bool, fov_x = fov_x)
         print(f"[infer] Took {time.time() - t0:.3f} sec")
-
 
         points = output["points"].cpu().numpy()  # (H, W, 3)
         depth = output["depth"].cpu().numpy()
@@ -439,8 +438,10 @@ class GaussiansHandling :
         # save clean points and colors
         masked_points = pts_flat[valid_flat]
         masked_colors = colors_flat[valid_flat]
-  
-        return masked_points, masked_colors , all_points, all_colors , mask_cleaned
+
+        intrinsics = output["intrinsics"]  # (3, 3) numpy/torch array, normalized
+
+        return masked_points, masked_colors , all_points, all_colors , mask_cleaned, intrinsics
 
 
 

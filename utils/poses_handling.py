@@ -107,7 +107,7 @@ class PosesHandling :
         images_path = f"{sfm_path}/images"
         sparse_path = f"{sfm_path}/sparse"
         database_path = f"{sfm_path}/database.db" 
-
+        
         # 1. Create database
         MyUtils.run_cmd(f"colmap database_creator --database_path {database_path}")
 
@@ -132,7 +132,7 @@ class PosesHandling :
             f"--database_path {database_path} "
             f"--FeatureMatching.use_gpu 1"
         )
-
+        
         # 4. Mapping
         MyUtils.run_cmd(
             f"colmap mapper "

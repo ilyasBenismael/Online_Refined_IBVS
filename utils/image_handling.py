@@ -113,12 +113,6 @@ class ImageHandling :
 
 
 
-
-
-
-
-
-
     @staticmethod
     def save_img(img, title, folder_path, assume_rgb=True):
         os.makedirs(folder_path, exist_ok=True)
@@ -127,11 +121,6 @@ class ImageHandling :
         if assume_rgb:
             img_u8 = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(folder_path, f"{title}.png"), img_u8)
-
-
-
-
-
 
 
 

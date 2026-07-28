@@ -13,13 +13,17 @@ class MeshHandling :
 
 
     
-    def __init__(self, CAM_W, CAM_H):
+    def __init__(self, CAM_W, CAM_H, fx = None):
         
         self.CAM_W = CAM_W
         self.CAM_H = CAM_H
         self.CX = CAM_W / 2.0
         self.CY = CAM_H / 2.0
-        self.FX = self.FY = 0.8 * max(CAM_W, CAM_H)
+
+        if fx is None : 
+            self.FX = self.FY = 0.8 * max(CAM_W, CAM_H)
+        else :
+            self.FX = self.FY = fx
 
         self.intrins_o3d = o3d.camera.PinholeCameraIntrinsic(
             width=self.CAM_W,
@@ -102,38 +106,23 @@ class MeshHandling :
 
 
     @staticmethod
-    def turn_points_to_spheres(points, raduis = 0.1) :
-        
+    def turn_points_to_spheres(points, radius=0.1, random=True, color=[0, 0, 1]):
+
         n = len(points)
-        colors = plt.cm.hsv(np.linspace(0, 1, n))[:, :3]
-        colors = [[0, 0, 1] for _ in range(n)]  # pure blue (RGB)
-        spheres=[]
-        i=-1
+        if random:
+            colors = plt.cm.hsv(np.linspace(0, 1, n))[:, :3]
+        else:
+            colors = [color for _ in range(n)]
 
-        for point in points:
-            
-            i+=1
-            
-            # Create sphere mesh
-            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=raduis)
-            
-            # Translate sphere to the point location
-            sphere.translate(point)
-            
-            # Assign color to the sphere
-            sphere.paint_uniform_color(colors[i])
-            
-            # Add to list
-            spheres.append(sphere)
-
-        # If you want to combine all spheres into one mesh (optional)
         combined_spheres = o3d.geometry.TriangleMesh()
-        for sphere in spheres:
+
+        for point, c in zip(points, colors):
+            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=radius)
+            sphere.translate(point)
+            sphere.paint_uniform_color(c)
             combined_spheres += sphere
 
         return combined_spheres
-
-
 
 
 
@@ -304,8 +293,8 @@ class MeshHandling :
 
 
     @staticmethod
-    def get_pose_axis(pose) :
-        axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0, origin=[0, 0, 0])
+    def get_pose_axis(pose, size = 1) :
+        axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=size, origin=[0, 0, 0])
         axis.transform(pose)
         return axis
 

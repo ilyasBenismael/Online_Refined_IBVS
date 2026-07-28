@@ -27,9 +27,9 @@ from modules.xfeat import XFeat
 
 
 # Main_tests path for shortcuts
-scene_name = "thehouse"
+scene_name = "woodroom"
 case_nbr = 3
-CAM_W, CAM_H = 1332, 876
+CAM_W, CAM_H = 1228, 816
 main_test_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test"
 case_test_path = f"{main_test_path}/{scene_name}/{scene_name}_case{case_nbr}"
 
@@ -72,18 +72,18 @@ intrins_o3d = o3d.camera.PinholeCameraIntrinsic(
 # Starting states
 did_start = True
 trans_exist = True
-des0_ready = False
-des0_aligned = False 
+des0_ready = True
+des0_aligned = True 
 des_GT_ready = True
 ibvs_desGT_converge = True
 ibvs_des0_converge = True
 neighbour_imgs_ready = False
 sfm0_ready = False
 init_img_gs2_name = "init_img.png"
-get_des_frm_gs = True
+get_des_frm_gs = False
 
-init_img_gs1_name = "IMG_6393.jpg"
-neighbour_imgs_name = ["IMG_6299.jpg", "IMG_6300.jpg", "IMG_6379.jpg", "IMG_6380.jpg", "IMG_6394.jpg", "IMG_6403.jpg", "IMG_6453.jpg", "IMG_6460.jpg", "IMG_6461.jpg", "IMG_6475.jpg", "IMG_6506.jpg", "IMG_6507.jpg"]
+init_img_gs1_name = "DSC04363.JPG"
+neighbour_imgs_name = ["DSC04364.JPG", "DSC04365.JPG", "DSC04307.JPG", "DSC04315.JPG", "DSC04352.JPG", "DSC04438.JPG"]
 
 # IBVS Vars
 lambda_gain = 0.1
@@ -97,9 +97,9 @@ ibvs_pxl_error_conv = 0.02
 np.set_printoptions(precision=2, suppress=False)
 xfeat = XFeat()
 ibvs_nbr_features = 10
-moge_reso = 4
+moge_reso = 1
 moge_model_reso_lvl = 1
-moge_depth_edge_threshold = 0.01
+moge_depth_edge_threshold = 0.05
 
 
 
@@ -447,6 +447,35 @@ def dyna_ibvs(gaussians, intrins_gs1, init_pose_gs1, des_img, des_ibvs_infos_npy
 
 
 
+def getposefrmibvs(ibvs_npy_path, itr_nbr):
+
+    ibvs_dict = np.load(ibvs_npy_path, allow_pickle=True).item()
+
+    if itr_nbr not in ibvs_dict:
+        raise KeyError(f"Iteration {itr_nbr} not found in '{ibvs_npy_path}'.")
+
+    ibvs_infos = ibvs_dict[itr_nbr]
+    cur_pose_gs1 = ibvs_infos[-1]
+
+    return cur_pose_gs1
+
+
+
+
+
+
+
+def get_cloud_nd_axis(ibvs_itr, moge_model, gaussians1, intrins_gs1) :
+    pose = getposefrmibvs(f"{case_test_path}/ibvs_infos.npy", ibvs_itr)
+    img, _ = GaussiansHandling.render_gs_pic(*gaussians1, pose, intrins_gs1, CAM_W, CAM_H)
+
+    masked_points, masked_colors, all_moge_points, all_moge_colors, moge_mask = GaussiansHandling.get_moge_points(img, model_reso_lvl=moge_model_reso_lvl, depth_edge_threshold=moge_depth_edge_threshold, moge_model=moge_model, use_fp16_bool=False) 
+    moge_points_o3d = MeshHandling.turn_points_to_o3d(masked_points, masked_colors)    
+    pose_axis = MeshHandling.get_pose_axis(pose, size=0.5)
+    return moge_points_o3d, pose_axis
+
+
+
 
 
 
@@ -460,9 +489,344 @@ def dyna_ibvs(gaussians, intrins_gs1, init_pose_gs1, des_img, des_ibvs_infos_npy
 
 def main() :
 
-    sfm_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/train/real_scene/sfm_train"
-    PosesHandling.apply_sfm_reconstruction(sfm_path, True)
+
+    # Init infos 
+    gaussians1 = load_gaussians_from_ply(gs1_ply_path)
+    recons1 = PosesHandling.get_recons(gs1_sfm_path)
+    K_gs1 = PosesHandling.get_cam_matrix(recons1)
+    intrins_gs1 = GaussiansHandling.turn_cam_matrix_to_gsplat_format(K_gs1)
+    moge_model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to("cuda")
+    ibvs_tools = IbvsTools(CAM_W, CAM_H)
+    ibvs_elmnts = [1, 17, 32, 49, 67, 87, 108, 131, 156, 184, 215, 249, 288, 332, 385, 450, 534, 654, 866]
+    nbr_matches = 100
+    scale_test = 0.43 # gs1 and moge for woodroom3
+    #scale_test = 0.98 # gs1 and moge for housecase1
+
+    tst_path = f"{case_test_path}/test_ibvs_alignement"
+
+    # printing gs1 intrinsics : 
+    print("gs1 intrinsics from colmap", K_gs1)
+    fx_gs1 = K_gs1[0, 0]
+    fy_gs1 = K_gs1[1, 1]
+    cx_gs1 = K_gs1[0, 2]
+    cy_gs1 = K_gs1[1, 2]
+    print("fx_gs1, fy_gs1, cx_gs1, cy_gs1 : ", fx_gs1, fy_gs1, cx_gs1, cy_gs1)
+
+    # Getting fov_x_deg from gs1 intrins to use in MoGe
+    fov_x_rad = 2 * np.arctan(CAM_W / (2 * fx_gs1))
+    fov_x_deg = np.rad2deg(fov_x_rad)
+    print("fov_x_rad, fov_x_deg", fov_x_rad, fov_x_deg)
+    mesh_handling = MeshHandling(CAM_W, CAM_H, fx=fx_gs1)
+
+    """
+    # Get : ibvs pose, img, cloud for img1
+    pose1 = getposefrmibvs(f"{case_test_path}/ibvs_infos.npy", ibvs_elmnts[0])
+    img1, _ = GaussiansHandling.render_gs_pic(*gaussians1, pose1, intrins_gs1, CAM_W, CAM_H)
+    masked_points1, masked_colors1, all_moge_points1, all_moge_colors1, moge_mask1, moge_intrins1 = GaussiansHandling.get_moge_points(img1, fov_x=fov_x_deg, model_reso_lvl=moge_model_reso_lvl, depth_edge_threshold=moge_depth_edge_threshold, moge_model=moge_model, use_fp16_bool=False) 
+    all_moge_points1 = LinAlgeb.transform_points_to_world(all_moge_points1, pose1) # express the points in the world frame
+    
+    
+    # Get : ibvs pose, img, cloud for img2
+    pose2 = getposefrmibvs(f"{case_test_path}/ibvs_infos.npy", ibvs_elmnts[1])
+    img2, _ = GaussiansHandling.render_gs_pic(*gaussians1, pose2, intrins_gs1, CAM_W, CAM_H)
+    masked_points2, masked_colors2, all_moge_points2, all_moge_colors2, moge_mask2, moge_intrins2 = GaussiansHandling.get_moge_points(img2, fov_x=fov_x_deg, model_reso_lvl=moge_model_reso_lvl, depth_edge_threshold=moge_depth_edge_threshold, moge_model=moge_model, use_fp16_bool=False) 
+    all_moge_points2 = LinAlgeb.transform_points_to_world(all_moge_points2, pose2)
+
+    # optimizing scale using render of img2 to the cloud1 starting from inital relative pose to img1 frm ibvs, 
+    
+
+    # scaling pose1 and cloud1 
+    pose1[:3, 3] *= scale_test
+    #pose1_axis = MeshHandling.get_pose_axis(pose1, 0.2)
+    all_moge_points1 = all_moge_points1 * scale_test
+    all_moge_points1_o3d = MeshHandling.turn_points_to_o3d(all_moge_points1, all_moge_colors1)
+    scene_compos = []; # scene_compos.append(pose1_axis); 
+    scene_compos.append(all_moge_points1_o3d)
+    img1_render, _ = mesh_handling.render_mesh_pic([all_moge_points1_o3d], pose1)
+
+    ImageHandling.save_img(img1, "img1_GT.png", tst_path)
+    ImageHandling.save_img(img1_render, "img1_rndr.png", tst_path)
+    """
+
+    # loop on all kfs, scale their poses and the corresp clouds
+    scene_compos = []
+    for elmnt in ibvs_elmnts[1:]:
+
+        # get the pose in gs1 and render the corresp img and get its cloud
+        pose = getposefrmibvs(f"{case_test_path}/ibvs_infos.npy", elmnt)
+        img, _ = GaussiansHandling.render_gs_pic(*gaussians1, pose, intrins_gs1, CAM_W, CAM_H)
+        masked_points, masked_colors, all_moge_points, all_moge_colors, moge_mask, moge_intrins = GaussiansHandling.get_moge_points(img, fov_x=fov_x_deg, model_reso_lvl=moge_model_reso_lvl, depth_edge_threshold=moge_depth_edge_threshold, moge_model=moge_model, use_fp16_bool=False) 
+
+        # scale the pose
+        pose[:3, 3] *= scale_test
+        pose_axis = MeshHandling.get_pose_axis(pose, 0.2); #scene_compos.append(pose_axis)
+        all_moge_points = LinAlgeb.transform_points_to_world(all_moge_points, pose) # express the points in the world frame        
+
+        # render the moge cloud from aligned kf pose, apply txtr mask on both and keep new txtred pixels
+        img_render, _ = mesh_handling.render_mesh_pic(scene_compos, pose)
+        _, txtr_mask_kf = ImageHandling.compute_texturemap_and_mask(img, threshold=0.05)
+        _, txtr_mask_rndr_kf = ImageHandling.compute_texturemap_and_mask(img_render, threshold=0.01)
+        txtr_mask = txtr_mask_kf & (~txtr_mask_rndr_kf)
+        final_mask = moge_mask & txtr_mask    # update final mask with moge mask, cuz the pixels with inf 3d value should be avoided
+
+        ImageHandling.save_img(txtr_mask_kf, f"img{elmnt}_txt_img.png", tst_path)
+        ImageHandling.save_img(txtr_mask_rndr_kf, f"img{elmnt}__txt_img_render.png", tst_path)
+        ImageHandling.save_img(final_mask, f"img{elmnt}_txt_img_render_diff.png", tst_path)
+
+        # Flatten all moge points and filter them (keep trusted+textured ones to turn to gaussians)
+        all_moge_colors_flat = all_moge_colors.reshape(-1, 3) # turning H,W,3 to H*W,3
+        all_moge_points_flat = all_moge_points.reshape(-1, 3).astype(np.float64)
+        final_mask_flat = final_mask.reshape(-1)  #turning H,W,1 to H*W,1
+        final_moge_colors = all_moge_colors_flat[final_mask_flat]
+        final_moge_points = all_moge_points_flat[final_mask_flat]
+        final_moge_points_o3d = MeshHandling.turn_points_to_o3d(final_moge_points, final_moge_colors); scene_compos.append(final_moge_points_o3d)
+
+        img_render_new, _ = mesh_handling.render_mesh_pic(scene_compos, pose)
+        ImageHandling.save_img(img, f"img{elmnt}_GT.png", tst_path)
+        ImageHandling.save_img(img_render, f"img{elmnt}_rndr.png", tst_path)
+        ImageHandling.save_img(img_render_new, f"img{elmnt}_rndr_new.png", tst_path)
+
+    MeshHandling.visualize_scene(scene_compos)    
+
+
+
+
+    """
+    # printing cloud s intrinsics
+    fx_1 = moge_intrins1[0, 0] * CAM_W
+    fy_1 = moge_intrins1[1, 1] * CAM_H
+    cx_1 = moge_intrins1[0, 2] * CAM_W
+    cy_1 = moge_intrins1[1, 2] * CAM_H
+    print("moge 1 intrinsics output", moge_intrins1)
+    print("moge normalized : fx, fy, cx, cy", fx_1, fy_1, cx_1, cy_1)
+    # saving moge informations
+    np.save("all_moge_points1.npy", all_moge_points1)
+    np.save("all_moge_colors1.npy", all_moge_colors1)
+    np.save("moge_mask1.npy", moge_mask1)
+    
+    # printing cloud s intrinsics
+    fx_2 = moge_intrins2[0, 0] * CAM_W
+    fy_2 = moge_intrins2[1, 1] * CAM_H
+    cx_2 = moge_intrins2[0, 2] * CAM_W
+    cy_2 = moge_intrins2[1, 2] * CAM_H
+    print("moge 2 intrinsics output", moge_intrins2)
+    print("moge normalized : fx, fy, cx, cy", fx_2, fy_2, cx_2, cy_2)
+    # saving moge informations
+    np.save("all_moge_points2.npy", all_moge_points2)
+    np.save("all_moge_colors2.npy", all_moge_colors2)
+    np.save("moge_mask2.npy", moge_mask2)
+    
+    #loading saved clouds
+    all_moge_points1 = np.load("all_moge_points1.npy")
+    all_moge_colors1 = np.load("all_moge_colors1.npy")
+    all_moge_points2 = np.load("all_moge_points2.npy") 
+    all_moge_colors2 = np.load("all_moge_colors2.npy") 
+    moge_mask1 = np.load("moge_mask1.npy") 
+    moge_mask2 = np.load("moge_mask2.npy") 
+    """    
+
+
+    # saving img 1 with its render for test
+    """
+    img1_render, _ = mesh_handling.render_mesh_pic([all_moge_points1_o3d], pose1) # just for test
+    ImageHandling.save_img(img1, "img1_GT.png", tst_path)
+    ImageHandling.save_img(img1_render, "img1_render.png", tst_path)
+    ImageHandling.save_img(img2, "img2_GT.png", tst_path) # saving the GT img2
+    """
+
+    # choosing the right scale 
+    """
+    scales = np.linspace(0.9, 2, 100)
+    for s in scales :
+        pose2_scaled = pose2.copy()
+        pose2_scaled[:3, 3] = pose1[:3, 3] + s * (pose2[:3, 3] - pose1[:3, 3]) # we find the scale by keeping pose1 fixed and only changing the distance btwn pose1 nd pose2 and render from the new relative pose, then we can use that scale for all the poses
+        img2_render, _ = mesh_handling.render_mesh_pic([all_moge_points1_o3d], pose2_scaled)
+
+        # compute Photometric error 
+        img2_render_g = ImageHandling.turn_img_to_gray(img2_render)
+        img2_g = ImageHandling.turn_img_to_gray(img2)
+        diff_img = ImageHandling.compute_grayscale_difference(img2_render_g, img2_g)
+        ImageHandling.save_img(diff_img, f"{s:.5f}_diff.png", tst_path) 
+    """
+
+
+
+    # get the xfeat matches 
+    
+    """
+    kpts_kf1, desc_kf1 = ibvs_tools.get_xfeat_kpts(img1)
+    kpts_kf2, desc_kf2 = ibvs_tools.get_xfeat_kpts(img2)
+    idxs0, idxs1 = xfeat.match(desc_kf1, desc_kf2)
+    matches_kf1 = kpts_kf1[idxs0]
+    matches_kf2 = kpts_kf2[idxs1]
+    matches_kf1 = matches_kf1[:nbr_matches].to(torch.int).cpu().numpy()
+    matches_kf2 = matches_kf2[:nbr_matches].to(torch.int).cpu().numpy()
+
+    np.save("matches_kf1.npy", matches_kf1)
+    np.save("matches_kf2.npy", matches_kf2)
+
+    matches_kf1 = np.load("matches_kf1.npy")
+    matches_kf2 = np.load("matches_kf2.npy")
+    
+    # get the indices(x,y) of the xfeat matched 2d points on img1 and img2
+    x1 = matches_kf1[:, 0]
+    y1 = matches_kf1[:, 1]
+    x2 = matches_kf2[:, 0]
+    y2 = matches_kf2[:, 1]
+
+    # return the moge mask for the xfeat points (True for the valid xfeat points) => 1D [T, F, T..] lngth of the xfeat points
+    valid1 = moge_mask1[y1, x1]
+    valid2 = moge_mask2[y2, x2]
+    valid = valid1 & valid2
+
+    # Corresponding 3D points and colors of the valid 2d xfeat matches
+    matched_points3d1 = all_moge_points1[y1, x1][valid]
+    matched_colors1 = all_moge_colors1[y1, x1][valid]
+    matched_points3d2 = all_moge_points2[y2, x2][valid]
+    matched_colors2 = all_moge_colors2[y2, x2][valid]
+    """
+
+
+    #__________________________________________________
+
+    """ 
+    # render the cloud1 from the scaled pose 2 (got to be similar to img2)
+    img2_render, _ = mesh_handling.render_mesh_pic([all_moge_points1_o3d], pose2_scaled)
+    img1_render, _ = mesh_handling.render_mesh_pic([all_moge_points1_o3d], pose1) # just for test
+
+    # compute Photometric error 
+    img2_render_g = ImageHandling.turn_img_to_gray(img2_render)
+    img2_g = ImageHandling.turn_img_to_gray(img2)
+    diff_img = ImageHandling.compute_grayscale_difference(img2_render_g, img2_g)
+
+    # Saving results
+    ImageHandling.save_img(img1, f"{scale_test:.3f}_img1_GT.png", tst_path)
+    ImageHandling.save_img(img1_render, f"{scale_test:.3f}_img1_rndr.png", tst_path)
+    ImageHandling.save_img(img2, f"{scale_test:.3f}_img2_GT.png", tst_path)
+    ImageHandling.save_img(img2_render, f"{scale_test:.3f}_img2_rndr.png", tst_path)
+    ImageHandling.save_img(diff_img, f"{scale_test:.3f}_img2_diff.png", tst_path)
+    """
+
     return
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    """
+    PosesHandling.apply_sfm_reconstruction("/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/tocheck/raw_datasets/sfm_books", False)
+    return
+
+    from pathlib import Path
+    from PIL import Image
+
+    # ===== Configuration =====
+    FOLDER = Path("/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/tocheck/raw_datasets/sfm_cars/images")
+    TARGET_WIDTH = 1500
+    TARGET_HEIGHT = 1000
+    # =========================
+
+    for img_path in FOLDER.iterdir():
+        if not img_path.is_file():
+            continue
+
+        try:
+            with Image.open(img_path) as img:
+                w, h = img.size
+
+                if w < TARGET_WIDTH or h < TARGET_HEIGHT:
+                    print(f"Skipping {img_path.name}: image too small ({w}x{h})")
+                    continue
+
+                # Crop equally from left/right
+                left = (w - TARGET_WIDTH) // 2
+                right = left + TARGET_WIDTH
+
+                # Keep the bottom of the image (crop only from the top)
+                top = h - TARGET_HEIGHT
+                bottom = h
+
+                cropped = img.crop((left, top, right, bottom))
+                cropped.save(img_path)
+
+                print(f"Cropped {img_path.name}: {w}x{h} -> {TARGET_WIDTH}x{TARGET_HEIGHT}")
+
+        except Exception as e:
+            print(f"Error processing {img_path.name}: {e}")
+
+
+    return #__________________ from center
+    for img_path in FOLDER.iterdir():
+        if not img_path.is_file():
+            continue
+
+        try:
+            with Image.open(img_path) as img:
+                w, h = img.size
+
+                if w < TARGET_WIDTH or h < TARGET_HEIGHT:
+                    print(f"Skipping {img_path.name}: image too small ({w}x{h})")
+                    continue
+
+                # Compute centered crop
+                left = (w - TARGET_WIDTH) // 2
+                top = (h - TARGET_HEIGHT) // 2
+                right = left + TARGET_WIDTH
+                bottom = top + TARGET_HEIGHT
+
+                cropped = img.crop((left, top, right, bottom))
+                cropped.save(img_path)
+
+                print(f"Cropped {img_path.name}: {w}x{h} -> {TARGET_WIDTH}x{TARGET_HEIGHT}")
+
+        except Exception as e:
+            print(f"Error processing {img_path.name}: {e}")
+
+    return
+    """
+
 
     # Make the folders
     if not did_start :
@@ -523,7 +887,7 @@ def main() :
     if not des0_aligned :
         # copy gs1_sfm and align des1 with it
         MyUtils.copy_any(gs1_sfm_path, gs1_sfm_aligned_path, overwrite=True)
-        PosesHandling.align_new_image(f"{des_imgs_path}/des0.png", gs1_sfm_aligned_path)
+        PosesHandling.align_new_image(f"{des_imgs_path}/des0.png", gs1_sfm_aligned_path, sequential=False)
     
 
     if not des_GT_ready :
@@ -544,7 +908,6 @@ def main() :
         ImageHandling.save_img(gt_des_img_masked, "gt_des_img_masked", des_imgs_path)
 
 
-    
     if not ibvs_desGT_converge :
         gt_des_img = ImageHandling.load_np_img(f"{des_imgs_path}/GT_des.png") 
         dyna_ibvs(gaussians1, intrins_gs1, init_img_pose_gs1, gt_des_img, desGT_ibvs_infos_npy_path)
@@ -554,9 +917,6 @@ def main() :
         des0_img = ImageHandling.load_np_img(f"{des_imgs_path}/des0.png") 
         dyna_ibvs(gaussians1, intrins_gs1, init_img_pose_gs1, des0_img, des0_ibvs_infos_npy_path)
 
-
-
-  
 
     if not neighbour_imgs_ready :
         i=0

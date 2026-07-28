@@ -33,7 +33,7 @@ from modules.xfeat import XFeat
 
 
 # Robot camera______________________________________________________
-CAM_W, CAM_H = 1332, 876
+CAM_W, CAM_H = 1228, 816 
 
 
 # IBVS Vars_________________________________________________________
@@ -53,7 +53,7 @@ gs_nbr_itrs = 50
 # Paths___________________________________________________________
 
 # Main_tests path for shortcuts
-scene_name = "thehouse"
+scene_name = "woodroom"
 case_nbr = 3
 main_test_path = "my_results/online_ibvs_test"
 case_test_path = f"{main_test_path}/{scene_name}/{scene_name}_case{case_nbr}"
@@ -85,7 +85,7 @@ real_frames_path = f"{case_test_path}/ibvs_frames/real_frames"
 matches_frames_path = f"{case_test_path}/ibvs_frames/matches_frames"
 
 # init & des imgs info
-init_img_name_sfm1 = "IMG_6393.jpg"
+init_img_name_sfm1 = "DSC04363.JPG"
 des_img_name_sfm1 = des_img_name_sfm_gs2 = gt_des_name = "des0.png"
 
 
@@ -613,6 +613,7 @@ def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
         i=0
         kf_vrsn = 0
         last_kf_versn = 0
+        gs_nbr_itrs = 150
         moge_model = None
         curr_recons2 = pycolmap.Reconstruction(f"{sfms_path}/sfm0/sparse/0")
         K = PosesHandling.get_cam_matrix(curr_recons2)
@@ -730,9 +731,17 @@ def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
                 msg = f"🟢{i}-Render & Saving mid_des_img, KF({kf_vrsn})"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s"); _t = time.time()
                 log_to_table(msg, 'gs', dt)
 
-                
+            
 
             # Train last gs2_pre then save new gs2
+            
+            if (i==1) :
+                gs_nbr_itrs = 200
+                inria_saved_ply_path = f"{case_test_path}/gs2s/inria_output/point_cloud/iteration_{gs_nbr_itrs}/point_cloud.ply"
+            if (i == 2) :
+                gs_nbr_itrs = 50  
+                inria_saved_ply_path = f"{case_test_path}/gs2s/inria_output/point_cloud/iteration_{gs_nbr_itrs}/point_cloud.ply"
+ 
             _t = time.time()
             GaussiansHandling.run_gs_training(sfm_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{sfms_path}/sfm{kf_vrsn}", output_path= f"/home/user/Bureau/visual_navigation/IBVS_CODE/{gs2s_dir_path}/inria_output", gs_reso = gs_reso, gs_nbr_itrs = gs_nbr_itrs)
             shutil.copy2(inria_saved_ply_path, f"{gs2s_dir_path}/gs2_{i}.ply")
@@ -753,6 +762,8 @@ def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
 
             if (i % 5) == 0 :
                 MyUtils.cleanup()
+
+                      
 
     except Exception as e:
         MyUtils.cleanup()
