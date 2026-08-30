@@ -251,6 +251,57 @@ class LinAlgeb :
     def inverse_sigmoid(y):
         # y must be in (0, 1)
         return np.log(y / (1 - y))
-    
 
+
+        
+
+    @staticmethod
+    def align_clouds_with_trans(cloud1: np.ndarray, cloud2: np.ndarray) -> np.ndarray:
+        """
+        Compute the translation t such that (cloud2 + t) is closest to cloud1
+        in a least-squares sense.
+    
+        Parameters
+        ----------
+        cloud1 : (N, 3) array of target points (xyz)
+        cloud2 : (N, 3) array of source points (xyz), same correspondence order as cloud1
+    
+        Returns
+        -------
+        t : (3,) translation vector to ADD to cloud2 to align it with cloud1
+        """
+        cloud1 = np.asarray(cloud1, dtype=np.float64)
+        cloud2 = np.asarray(cloud2, dtype=np.float64)
+    
+        if cloud1.shape != cloud2.shape:
+            raise ValueError(f"Shape mismatch: {cloud1.shape} vs {cloud2.shape}")
+        if cloud1.ndim != 2 or cloud1.shape[1] != 3:
+            raise ValueError(f"Expected (N, 3) arrays, got {cloud1.shape}")
+    
+        centroid1 = cloud1.mean(axis=0)
+        centroid2 = cloud2.mean(axis=0)
+    
+        t = centroid1 - centroid2
+        return t
+
+
+    @staticmethod
+    def transform_pose(T1: np.ndarray, T2: np.ndarray) -> np.ndarray:
+        """
+        Apply homogeneous transformation T2 to pose T1.
+
+        Parameters
+        ----------
+        T1 : (4,4) np.ndarray
+            Original pose.
+        T2 : (4,4) np.ndarray
+            Transformation to apply.
+
+        Returns
+        -------
+        (4,4) np.ndarray
+            Transformed pose: T2 @ T1.
+        """
+        return T2 @ T1
+        
 

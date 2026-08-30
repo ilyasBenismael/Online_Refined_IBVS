@@ -13,18 +13,24 @@ class MeshHandling :
 
 
     
-    def __init__(self, CAM_W, CAM_H, fx = None):
+    def __init__(self, CAM_W, CAM_H, fx = None, fy = None, cx = None, cy = None):
         
         self.CAM_W = CAM_W
         self.CAM_H = CAM_H
-        self.CX = CAM_W / 2.0
-        self.CY = CAM_H / 2.0
 
         if fx is None : 
             self.FX = self.FY = 0.8 * max(CAM_W, CAM_H)
         else :
-            self.FX = self.FY = fx
+            self.FX = fx
+            self.FY = fy
 
+        if cx is None :
+            self.CX = CAM_W / 2.0
+            self.CY = CAM_H / 2.0
+        else :    
+            self.CX = cx
+            self.CY = cy
+        
         self.intrins_o3d = o3d.camera.PinholeCameraIntrinsic(
             width=self.CAM_W,
             height=self.CAM_H,
@@ -149,22 +155,26 @@ class MeshHandling :
         return o3d_points
 
 
+
         
-    def render_mesh_pic(self, scene_compos, extrins):
+    def render_mesh_pic(self, scene_compos, extrins) :
 
         # defining extrins and T_cw_final params 
         extrins = np.linalg.inv(extrins)
 
         # making our pincamparams objct
         cam_params = o3d.camera.PinholeCameraParameters()
-        cam_params.intrinsic = self.intrins_o3d
         cam_params.extrinsic = extrins
-
+        cam_params.intrinsic = self.intrins_o3d
+    
         # ---------- Create visualizer ----------
         vis = o3d.visualization.Visualizer()
         vis.create_window(width=self.CAM_W, height=self.CAM_H, visible=False)
+        opt = vis.get_render_option()
+        opt.background_color = np.array([0.0, 0.0, 0.0])  # black
         for geom in scene_compos:
             vis.add_geometry(geom)
+    
 
         # ---------- Apply camera ----------
         ctr = vis.get_view_control()

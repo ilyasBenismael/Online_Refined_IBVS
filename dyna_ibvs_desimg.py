@@ -600,9 +600,6 @@ def dyna_ibvs_loop(shared, kf_queue, des_img_queue, kf_event, gs1_ply_path, init
 
 
 
-
-
-
 def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
 
     try : 
@@ -694,7 +691,6 @@ def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
                 # Get the transformation infos between sfm-cloud and moge-cloud
                 _, s, R, t = MeshHandling.align_points(sfm_moge_points, img_sfm_points_3d)
 
-
                 #___________________________________________
                 """
                 sfm_moge_points_o3d = MeshHandling.turn_points_to_o3d(sfm_moge_points)
@@ -702,7 +698,6 @@ def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
                 MeshHandling.visualize_scene([sfm_moge_points_o3d, img_sfm_points_3d_o3d])
                 """
                 #___________________________________________
-
 
                 # Flatten all moge points and filter them (keep trusted+textured ones to turn to gaussians)
                 all_moge_colors_flat = all_moge_colors.reshape(-1, 3) # turning H,W,3 to H*W,3
@@ -732,9 +727,7 @@ def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
                 log_to_table(msg, 'gs', dt)
 
             
-
-            # Train last gs2_pre then save new gs2
-            
+            # Train last gs2_pre then save new gs2  
             if (i==1) :
                 gs_nbr_itrs = 200
                 inria_saved_ply_path = f"{case_test_path}/gs2s/inria_output/point_cloud/iteration_{gs_nbr_itrs}/point_cloud.ply"
@@ -815,9 +808,6 @@ def main() :
     p2.join()
 
     return
-
-
-
 
 
 

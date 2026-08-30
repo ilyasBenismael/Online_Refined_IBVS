@@ -6,13 +6,13 @@ import os
 import pycolmap
 import shutil
 import heapq
-
-
+from pathlib import Path
 
 
 
 
 class PosesHandling :
+
 
     @staticmethod
     def get_recons(sfm_path) :
@@ -271,4 +271,113 @@ class PosesHandling :
 
         return None
 
+
+    @staticmethod
+    def get_K(fx, fy, cx, cy):
+        return np.array([
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0]
+        ], dtype=np.float32)
+
+
+
+
+    @staticmethod
+    def rotmat_to_quaternion_hamilton(R):
+
+        q = np.empty(4)
+        trace = np.trace(R)
+
+        if trace > 0:
+            s = 0.5 / np.sqrt(trace + 1.0)
+            q[0] = 0.25 / s
+            q[1] = (R[2,1] - R[1,2]) * s
+            q[2] = (R[0,2] - R[2,0]) * s
+            q[3] = (R[1,0] - R[0,1]) * s
+        else:
+            if R[0,0] > R[1,1] and R[0,0] > R[2,2]:
+                s = 2.0 * np.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
+                q[0] = (R[2,1] - R[1,2]) / s
+                q[1] = 0.25 * s
+                q[2] = (R[0,1] + R[1,0]) / s
+                q[3] = (R[0,2] + R[2,0]) / s
+            elif R[1,1] > R[2,2]:
+                s = 2.0 * np.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
+                q[0] = (R[0,2] - R[2,0]) / s
+                q[1] = (R[0,1] + R[1,0]) / s
+                q[2] = 0.25 * s
+                q[3] = (R[1,2] + R[2,1]) / s
+            else:
+                s = 2.0 * np.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
+                q[0] = (R[1,0] - R[0,1]) / s
+                q[1] = (R[0,2] + R[2,0]) / s
+                q[2] = (R[1,2] + R[2,1]) / s
+                q[3] = 0.25 * s
+
+        q /= np.linalg.norm(q)
+        return q
+
+
+
+
+    @staticmethod
+    def make_colmap_data(sparse_path, img_ids, img_names, poses, W, H, fx, fy, cx=None, cy=None) :
+
+        if cx is None :
+            cx = W / 2.0
+            cy =  H / 2.0
+
+        # ---------------- cameras.txt ----------------
+        with open(os.path.join(sparse_path, "cameras.txt"), "w") as f_cam:
+            f_cam.write("# CAMERA_ID, MODEL, WIDTH, HEIGHT, W, H, fx, fy, cx, cy\n")
+            f_cam.write("1 PINHOLE {} {} {} {} {} {}\n".format(W, H, fx, fy, cx, cy))
+
+        # ---------------- point3d.txt ---------------
+        Path(f"{sparse_path}/points3D.txt").touch()
+
+
+        # ---------------- images.txt ----------------
+        with open(os.path.join(sparse_path, "images.txt"), "w") as f_img:
+
+            f_img.write("# IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
+            f_img.write("# POINTS2D[] as (X, Y, POINT3D_ID)\n")
+
+            for (img_id, pose, name) in zip(img_ids, poses, img_names):
+
+                # Prepare the qvec (for rotation) and translation
+                w2c = np.linalg.inv(pose)
+                R = w2c[:3, :3]
+                qvec = PosesHandling.rotmat_to_quaternion_hamilton(R)
+                t = w2c[:3, 3]
+
+                # line1 of poses
+                f_img.write(
+                    f"{img_id} {qvec[0]} {qvec[1]} {qvec[2]} {qvec[3]} "
+                    f"{t[0]} {t[1]} {t[2]} 1 {name}\n")
+                # line2 of 2d points keep it blank
+                f_img.write(" " + "\n")
+
+
+    @staticmethod
+    def add_imgs_to_colmap(ids, img_names, poses, sparse_path) :
+
+        # IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
+        # POINTS2D[] as (X, Y, POINT3D_ID)
+        camera_id = 1
+        txt_file = f"{sparse_path}/0/images.txt"
+
+        for (pose, img_name, image_id) in zip(poses, img_names, ids):
+
+            # Prepare the qvec (for rotation) and translation
+            w2c = np.linalg.inv(pose)
+            R = w2c[:3, :3]
+            qvec = PosesHandling.rotmat_to_quaternion_hamilton(R)
+            t = w2c[:3, 3]
+
+            # line1 of poses
+            MyUtils.add_line_to_text(txt_file, f"{image_id} {qvec[0]} {qvec[1]} {qvec[2]} {qvec[3]} {t[0]} {t[1]} {t[2]} {camera_id} {img_name}" )
+
+            # line 2 blank for 2d points
+            MyUtils.add_line_to_text(txt_file, "")
 

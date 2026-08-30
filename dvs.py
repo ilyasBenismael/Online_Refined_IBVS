@@ -181,11 +181,6 @@ def compute_image_interaction_matrix(cur_depth_map, grad_Ix, grad_Iy):
 
 
 
-
-
-
-
-
 def start_dvs_loop(gaussians, init_gs1_pose, des_img) :
 
     try:
@@ -258,15 +253,12 @@ def get_last_ibvs_pose(threshold):
             print(f"Pixel errors: {e1:.3f}, {e2:.3f}, {e3:.3f}")
             return data[i1][5]
 
-    raise ValueError(
-        f"No three consecutive iterations with pxl_error < {threshold} found."
-    )
+    raise ValueError(f"No three consecutive iterations with pxl_error < {threshold} found.")
 
 
 
 
 def main() :
-
     last_pose_gs1 = get_last_ibvs_pose(0.1)
     print(f"Last pose GS1: {last_pose_gs1}")
     init_pose = last_pose_gs1

@@ -4,6 +4,8 @@ import subprocess
 import matplotlib.pyplot as plt
 import os, shutil
 import numpy as np
+from pathlib import Path
+
 
 
 
@@ -50,10 +52,8 @@ class MyUtils :
         if os.path.isfile(src_path):
             # ensure parent folder exists
             os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-
             if os.path.exists(dst_path) and not overwrite:
-                raise FileExistsError(f"Destination exists: {dst_path}")
-            
+                raise FileExistsError(f"Destination exists: {dst_path}") 
             shutil.copy2(src_path, dst_path)
             return
 
@@ -84,3 +84,49 @@ class MyUtils :
             npy_path,
             data,
             allow_pickle=True)
+
+
+
+
+    @staticmethod
+    def get_files_with_suffix(folder_path, suffix):
+        """
+        Return a sorted list of all files paths -str) in folder_path ending with suffix.
+
+        Parameters
+        ----------
+        folder_path : str or Path
+            Path to the folder.
+        suffix : str
+            File extension, e.g. ".png", ".ply", ".txt".
+
+        Returns
+        -------
+        list[str]
+            List of matching file paths.
+        """
+        folder = Path(folder_path)
+        return sorted(str(f) for f in folder.iterdir()
+                    if f.is_file() and f.name.endswith(suffix))
+
+
+
+    @staticmethod
+    def get_last_file_with_suffix(folder_path, suffix):
+        """
+        Return the last sorted file path in folder_path ending with suffix.
+        Returns None if no matching file is found.
+        """
+        folder = Path(folder_path)
+        files = sorted(
+            f for f in folder.iterdir()
+            if f.is_file() and f.name.endswith(suffix))
+        return str(files[-1]) if files else None
+
+
+    @staticmethod
+    def add_line_to_text(txt_file: str, line: str):
+        """Append one line to a text file."""
+        with open(txt_file, "a") as f:
+            f.write(line + "\n")
+

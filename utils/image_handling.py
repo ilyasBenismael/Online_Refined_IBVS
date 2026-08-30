@@ -329,3 +329,10 @@ class ImageHandling :
 
         return ssim_score.item(), psnr_score.item(), lpips_score.item()
 
+
+
+    @staticmethod
+    def apply_mask_on_img(img, mask):
+        out = img.copy()
+        out[~mask] = 0
+        return out

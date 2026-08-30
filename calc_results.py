@@ -58,7 +58,6 @@ METRICS = [
     "avrg_condit_nbr",
     "R_diff_last_itr_deg",
     "t_diff_last_itr_norm",
-    "avrg_condit_nbr_des0",
     "des0_GTmasked_ssim",
     "des0_GTmasked_psnr",
     "des0_GTmasked_lpips",
@@ -75,6 +74,11 @@ METRICS = [
     "nbr_kfs",
     "total_time"]
 
+
+"""
+"avrg_condit_nbr_des0",
+
+"""
 
 
 
@@ -290,7 +294,7 @@ def get_last_des(folder_path):
 
 
 
-
+"""
 def get_mid_des(des_path) -> np.ndarray:
     pattern = re.compile(r"des(\d+)_plus\.png$")
 
@@ -319,8 +323,44 @@ def get_mid_des(des_path) -> np.ndarray:
         raise FileNotFoundError(f"Image not found: {target_path}")
 
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+"""
 
 
+def get_mid_des(gs2_path, des_path) -> np.ndarray:
+    # Match only gs2_<number>_pre.ply
+    pattern = re.compile(r"gs2_(\d+)_pre\.ply$")
+
+    pre_files = []
+
+    for filename in os.listdir(gs2_path):
+        m = pattern.match(filename)
+        if m:
+            pre_files.append((int(m.group(1)), filename))
+
+    if not pre_files:
+        raise FileNotFoundError(
+            f"No gs2_<nbr>_pre.ply files found in {gs2_path}"
+        )
+
+    # Sort according to gs2 number
+    pre_files.sort(key=lambda x: x[0])
+
+    # Middle element (for even count, take the second middle)
+    mid_idx = len(pre_files) // 2
+
+    # Get corresponding gs2 number
+    mid_number = pre_files[mid_idx][0]
+
+    # Load des image having the SAME number
+    target_path = os.path.join(des_path, f"des{mid_number}.png")
+    print("mid nbr", mid_number)
+    img = cv2.imread(target_path, cv2.IMREAD_COLOR)
+
+    if img is None:
+        raise FileNotFoundError(
+            f"Corresponding desired image not found: {target_path}")
+
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
 
@@ -420,11 +460,21 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     results_dir = f"{case_path}/results"
     txt_path = f"{results_dir}/results.txt"
     desired_dir = f"{case_path}/desired_imgs"
+    gs2s_dir = f"{case_path}/gs2s"
+
+    # Create results directory and results.txt if it doesn't exist
+    """
+    os.makedirs(results_dir, exist_ok=True)
+    if not os.path.exists(txt_path):
+        open(txt_path, "w").close()
+    """
+    
 
     print(f"--- Processing {scene_name} case {case_nbr} ---")
 
+    """
     nbr_des = get_last_des_nbr(f"{case_path}/desired_imgs")
-    nbr_kfs = get_last_kf_nbr(f"{case_path}/keyframes")
+    nbr_kfs = get_last_kf_nbr(f"{case_path}/sfm/images")
     total_time = get_total_time(f"{case_path}/results.txt")
 
     add_line_to_text(txt_path, "----------- time -------------")
@@ -438,9 +488,7 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     # ------------------------------------------------------------------
     des0 = ImageHandling.load_np_img(f"{desired_dir}/des0.png")
     gt_des_masked = ImageHandling.load_np_img(f"{desired_dir}/gt_des_img_masked.png")
-
     ssim_val, psnr_val, lpips_val = ImageHandling.calc_imgs_sim_metrics(des0, gt_des_masked, 1)
-
 
     add_line_to_text(txt_path, "----------- imgs similarity -------------")
 
@@ -453,10 +501,7 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     # des0 vs GT_des
     # ------------------------------------------------------------------
     gt_des = ImageHandling.load_np_img(f"{desired_dir}/GT_des.png")
-
-    ssim_val, psnr_val, lpips_val = ImageHandling.calc_imgs_sim_metrics(
-        des0, gt_des, 1
-    )
+    ssim_val, psnr_val, lpips_val = ImageHandling.calc_imgs_sim_metrics(des0, gt_des, 1)
 
     add_line_to_text(txt_path, f"initdes_GTdes_ssim = {ssim_val}")
     add_line_to_text(txt_path, f"initdes_GTdes_psnr = {psnr_val}")
@@ -466,12 +511,9 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     # ------------------------------------------------------------------
     # middle desired vs GT_des
     # ------------------------------------------------------------------
-    mid_des = get_mid_des(desired_dir)
+    mid_des = get_mid_des(gs2s_dir, desired_dir)
 
-    ssim_val, psnr_val, lpips_val = ImageHandling.calc_imgs_sim_metrics(
-        mid_des, gt_des, 1
-    )
-
+    ssim_val, psnr_val, lpips_val = ImageHandling.calc_imgs_sim_metrics(mid_des, gt_des, 2)
     add_line_to_text(txt_path, f"middes_GTdes_ssim = {ssim_val}")
     add_line_to_text(txt_path, f"middes_GTdes_psnr = {psnr_val}")
     add_line_to_text(txt_path, f"middes_GTdes_lpips = {lpips_val}")
@@ -482,44 +524,41 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     # ------------------------------------------------------------------
     last_des = get_last_des(desired_dir)
 
-    ssim_val, psnr_val, lpips_val = ImageHandling.calc_imgs_sim_metrics(
-        last_des, gt_des, 1
-    )
-
+    ssim_val, psnr_val, lpips_val = ImageHandling.calc_imgs_sim_metrics(last_des, gt_des, 3)
     add_line_to_text(txt_path, f"finaldes_GTdes_ssim = {ssim_val}")
     add_line_to_text(txt_path, f"finaldes_GTdes_psnr = {psnr_val}")
     add_line_to_text(txt_path, f"finaldes_GTdes_lpips = {lpips_val}")
 
-
-
     add_line_to_text(txt_path, "----------- ibvs infos -------------")
+    
+    """
 
     # get GT / init poses
     configs_path = os.path.join(case_path, CONFIGS_FILENAME)
     init_img_name = get_init_img_name_frm_txt(configs_path)
     T_init = get_img_pose_gs1(init_img_name, f"{case_path}/gs1_sfm_aligned")
     T_gt = get_img_pose_gs1(gt_img_name, f"{case_path}/gs1_sfm_aligned")
-    add_line_to_text(f"init_img_gs1_name = {init_img_name}", txt_path)
+    add_line_to_text(txt_path, f"init_img_gs1_name = {init_img_name}")
 
     # calc GT_init R and t diff
     R_init, t_init = LinAlgeb.get_Rt_from_homog_matrix(T_init)
     R_gt, t_gt = LinAlgeb.get_Rt_from_homog_matrix(T_gt)
     R_diff_gt_init = LinAlgeb.rotation_diff(R_gt, R_init)
     t_diff_gt_init = LinAlgeb.pose_distance(t_gt, t_init)  # normalization vector
-    add_line_to_text(f"R_diff_gt_init_deg = {R_diff_gt_init}", txt_path)
-    add_line_to_text(f"t_diff_gt_init = {t_diff_gt_init}", txt_path)
-
+    add_line_to_text(txt_path, f"R_diff_gt_init_deg = {R_diff_gt_init}")
+    add_line_to_text(txt_path, f"t_diff_gt_init = {t_diff_gt_init}")
+    
 
     # Load ibvs_infos____________________________________________________________________________________
-    
+
     ibvs_infos_path = os.path.join(case_path, IBVS_INFOS_FILENAME)
     ibvs_infos = np.load(ibvs_infos_path, allow_pickle=True).item()
 
     # save ttle itrs nd condit nbr to txt
     total_nbr_itrs = get_total_nbr_of_itrs(ibvs_infos)
-    add_line_to_text(f"total_nbr_itrs = {total_nbr_itrs}", txt_path)
+    add_line_to_text(txt_path, f"total_nbr_itrs = {total_nbr_itrs}")
     avrg_condit_nbr = get_avrg_condit_nbr(ibvs_infos)
-    add_line_to_text(f"avrg_condit_nbr = {avrg_condit_nbr}", txt_path)
+    add_line_to_text(txt_path, f"avrg_condit_nbr = {avrg_condit_nbr}")
 
     # save all R diffs and t diffs
     iters_full, R_diffs_full, t_diffs_full = compute_pose_errors_per_iter(
@@ -531,10 +570,9 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
 
     # save last R nd t diffs to txt
     last_iter_full = iters_full[-1]
-    add_line_to_text(f"last_itr = {last_iter_full}", txt_path)
-    add_line_to_text(f"R_diff_last_itr_deg = {R_diffs_full[last_iter_full]}", txt_path)
-    add_line_to_text(f"t_diff_last_itr_norm = {t_diffs_full[last_iter_full]}", txt_path)
-
+    add_line_to_text(txt_path, f"last_itr = {last_iter_full}")
+    add_line_to_text(txt_path, f"R_diff_last_itr_deg = {R_diffs_full[last_iter_full]}")
+    add_line_to_text(txt_path, f"t_diff_last_itr_norm = {t_diffs_full[last_iter_full]}")
 
     """
 
@@ -563,7 +601,7 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     """
 
 
-    # Plot & save the 4 errors R,t R,t ________________________________________________
+    # Plot & save the 2 errors R,t ________________________________________________
     
     plot_error_vs_iter(
         iters_full, R_diffs_full,
@@ -646,7 +684,8 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
 
 
     # _________________________________________________  Des0_ibvs_infos vs ibvs_infos pixel-error comparison  __________________________________________
- 
+  
+    """
     des0_ibvs_infos_path = os.path.join(case_path, DES0_IBVS_INFOS_FILENAME)
     des0_ibvs_infos = np.load(des0_ibvs_infos_path, allow_pickle=True).item()
 
@@ -670,7 +709,7 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
         ylabel="Pixel error",
         title=f"{scene_name} case{case_nbr} - pixel error vs iter (IBVS vs des0_IBVS)",
         save_path=os.path.join(results_dir, "pxl_error_ibvs_vs_des0.png"),)
-
+    """
 
 
 
@@ -688,7 +727,7 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
 
 
 def main():
-    
+
     all_metrics = {k: [] for k in METRICS}
 
     for scene_name in SCENE_NAMES:
@@ -719,6 +758,7 @@ def main():
             case_folder_name = f"{scene_name}_case{case_nbr}"
             case_path = os.path.join(BASE_DIR, scene_name, case_folder_name)
             process_case(case_path, scene_name, case_nbr)
+   
     """
 
 
