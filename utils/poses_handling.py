@@ -177,10 +177,8 @@ class PosesHandling :
             f"--image_list_path {new_imgs_txt} "
             f"--ImageReader.existing_camera_id 1 "
             f"--FeatureExtraction.use_gpu 1 "
-            f"--SiftExtraction.max_image_size 1500"
-        )
+            f"--SiftExtraction.max_image_size 1500")
         MyUtils.run_cmd(cmd)
-
 
         # Matching
         matcher = "sequential"
@@ -190,18 +188,116 @@ class PosesHandling :
         MyUtils.run_cmd(
             f"colmap {matcher}_matcher "
             f"--database_path {db_path} "
-            f"--FeatureMatching.use_gpu 1"
-        )
-
+            f"--FeatureMatching.use_gpu 1")
 
         # Registration
         cmd = (
             f"colmap image_registrator "
             f"--database_path {db_path} "
             f"--input_path {sparse_path} "
-            f"--output_path {sparse_path}"
+            f"--output_path {sparse_path}")
+        MyUtils.run_cmd(cmd)
+
+
+
+
+
+
+    @staticmethod
+    def align_new_images(new_image_paths, sfm_path, sequential=False):
+
+        # Convert paths to strings and extract image names.
+        new_image_paths = [os.fspath(path) for path in new_image_paths]
+        new_image_names = [
+            os.path.basename(path)
+            for path in new_image_paths
+        ]
+
+        if not new_image_paths:
+            raise ValueError("new_image_paths is empty.")
+
+        # Prevent different source images from having the same filename.
+        if len(new_image_names) != len(set(new_image_names)):
+            raise ValueError(
+                "Some input images have the same filename."
+            )
+
+        images_dir = os.path.join(sfm_path, "images")
+        os.makedirs(images_dir, exist_ok=True)
+
+        # Check everything before copying any image.
+        for image_path, image_name in zip(
+            new_image_paths,
+            new_image_names
+        ):
+            if not os.path.isfile(image_path):
+                raise FileNotFoundError(
+                    f"Image does not exist: {image_path}"
+                )
+
+            destination = os.path.join(images_dir, image_name)
+
+            if os.path.exists(destination):
+                raise FileExistsError(
+                    f"Image to align already exists: {destination}"
+                )
+
+        # Copy all new images into the COLMAP images folder.
+        for image_path, image_name in zip(
+            new_image_paths,
+            new_image_names
+        ):
+            destination = os.path.join(images_dir, image_name)
+            shutil.copy2(image_path, destination)
+
+        # Write all image names, one per line.
+        new_imgs_txt = os.path.join(sfm_path, "new_imgs.txt")
+
+        with open(new_imgs_txt, "w") as file:
+            for image_name in new_image_names:
+                file.write(image_name + "\n")
+
+        db_path = os.path.join(sfm_path, "database.db")
+        sparse_path = os.path.join(sfm_path, "sparse/0")
+
+        # Extract features only for the new images.
+        cmd = (
+            f'colmap feature_extractor '
+            f'--database_path "{db_path}" '
+            f'--image_path "{images_dir}" '
+            f'--image_list_path "{new_imgs_txt}" '
+            f'--ImageReader.existing_camera_id 1 '
+            f'--FeatureExtraction.use_gpu 1 '
+            f'--SiftExtraction.max_image_size 1500'
         )
         MyUtils.run_cmd(cmd)
+
+        # Match the images.
+        matcher = "sequential" if sequential else "exhaustive"
+
+        cmd = (
+            f'colmap {matcher}_matcher '
+            f'--database_path "{db_path}" '
+            f'--FeatureMatching.use_gpu 1'
+        )
+        MyUtils.run_cmd(cmd)
+
+        # Register all new images.
+        cmd = (
+            f'colmap image_registrator '
+            f'--database_path "{db_path}" '
+            f'--input_path "{sparse_path}" '
+            f'--output_path "{sparse_path}"'
+        )
+        MyUtils.run_cmd(cmd)
+
+        print(f"Aligned {len(new_image_names)} new images:")
+        for image_name in new_image_names:
+            print(f"  - {image_name}")
+
+
+
+
 
 
 

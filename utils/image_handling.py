@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
-from PIL import Image
+from PIL import Image, ImageOps
 import os, io
 import sys
 from pathlib import Path
@@ -156,6 +156,8 @@ class ImageHandling :
     @staticmethod
     def compute_texturemap_and_mask(image_rgb, threshold=0.05):
         """
+        bigger the treshhold fewer the details kept
+
         Args:
             image_rgb: (H, W, 3)
             threshold: float in [0,1]
@@ -236,11 +238,11 @@ class ImageHandling :
 
 
     @staticmethod
-    def draw_matches(matches_1, matches_2, init_img, desired_img):
+    def draw_matches(matches_1, matches_2, img1, img2):
         
         # Copy images
-        im1_vis = init_img.copy()
-        im2_vis = desired_img.copy()
+        im1_vis = img1.copy()
+        im2_vis = img2.copy()
 
         # Ensure uint8
         if im1_vis.dtype != np.uint8:
@@ -331,8 +333,97 @@ class ImageHandling :
 
 
 
+
+    @staticmethod
+    def get_mask_frm_depth(depth):
+        depth = np.asarray(depth)
+        mask = np.isfinite(depth) & (depth > 0) 
+        return mask
+
+    
+    
     @staticmethod
     def apply_mask_on_img(img, mask):
         out = img.copy()
         out[~mask] = 0
         return out
+    
+
+
+
+
+    @staticmethod
+    def resize_imgs_folder(folder_path, max_size=1500):
+        folder_path = Path(folder_path)
+
+        valid_extensions = {
+            ".jpg", ".jpeg", ".png", ".bmp",
+            ".tif", ".tiff", ".webp"
+        }
+
+        for image_path in folder_path.iterdir():
+            if not image_path.is_file():
+                continue
+
+            if image_path.suffix.lower() not in valid_extensions:
+                continue
+
+            with Image.open(image_path) as img:
+                # Correct orientation using the image's EXIF information
+                img = ImageOps.exif_transpose(img)
+
+                width, height = img.size
+                largest_dimension = max(width, height)
+
+                # Do not enlarge images smaller than 1500 pixels
+                if largest_dimension <= max_size:
+                    print(f"Skipped: {image_path.name} ({width}x{height})")
+                    continue
+
+                scale = max_size / largest_dimension
+
+                new_width = round(width * scale)
+                new_height = round(height * scale)
+
+                resized_img = img.resize(
+                    (new_width, new_height),
+                    Image.Resampling.LANCZOS
+                )
+
+                # JPEG cannot store RGBA images
+                if image_path.suffix.lower() in {".jpg", ".jpeg"}:
+                    if resized_img.mode not in {"RGB", "L"}:
+                        resized_img = resized_img.convert("RGB")
+
+                    resized_img.save(
+                        image_path,
+                        quality=95,
+                        subsampling=0
+                    )
+                else:
+                    resized_img.save(image_path)
+
+                print(
+                    f"Resized: {image_path.name} "
+                    f"({width}x{height} -> {new_width}x{new_height})"
+                )
+
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+    def get_hw_of_img(img) :
+        """
+        expect a 3d np array, rtrn h,w
+        """
+        height, width = img.shape[:2]
+        return height, width
+

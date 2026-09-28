@@ -3,11 +3,14 @@ import os
 import sys
 from utils.lin_algeb import LinAlgeb
 import math
+import cv2
+
 from typing import List
 import torch
 from utils.image_handling import ImageHandling
 from utils.gaussians_handling import GaussiansHandling
 from utils.poses_handling import PosesHandling
+from utils.mesh_handling import MeshHandling
 from utils.my_utils import MyUtils
 from scipy.ndimage import distance_transform_edt
 
@@ -264,23 +267,23 @@ class IbvsTools :
 
 
 
+    #(last_gaussians2, intrins_gs2, des_pose_gs2, des0_img, case_test_path, des0_mask, max_itrs=125)
 
 
-
-    def start_dvs_loop(self, gaussians, intrins_gs1, init_pose, des_img, frames_saving_dir, mask = None, max_itrs=5550, detect_oscill = True) :
+    def start_dvs_loop(self, last_gaussians2, intrins_gs2, des_pose_gs2, des0_img, case_test_path, mask = None, max_itrs=500) :
 
         try:
+
             costs = []
+            cur_pose = des_pose_gs2
+            des_img = ImageHandling.img_255_to_01(des0_img)
+            gray_des = ImageHandling.turn_img_to_gray(des_img)
+            S_star = gray_des.flatten()
+
             for i in range(max_itrs):
 
-                if (i==0) :
-                    cur_pose = init_pose
-                    des_img = ImageHandling.img_255_to_01(des_img)
-                    gray_des = ImageHandling.turn_img_to_gray(des_img)
-                    S_star = gray_des.flatten()
-
                 # 1 - Capture current img nd get S
-                cur_img, cur_depth = GaussiansHandling.render_gs_pic(*gaussians, cur_pose, intrins_gs1, self.CAM_W, self.CAM_H)
+                cur_img, cur_depth = GaussiansHandling.render_gs_pic(*last_gaussians2, cur_pose, intrins_gs2, self.CAM_W, self.CAM_H)
 
                 if mask is not None :
                     cur_img = ImageHandling.apply_mask_on_img(cur_img, mask)
@@ -315,8 +318,8 @@ class IbvsTools :
 
                 if (i % 5) == 0 :
                     current_diff_img = ImageHandling.compute_grayscale_difference(gray_cur, gray_des)
-                    ImageHandling.save_img(cur_img, f"img_{i}", f"{frames_saving_dir}/dvs_infos/DVS_frames")
-                    ImageHandling.save_img(current_diff_img, f"diff_{i}", f"{frames_saving_dir}/dvs_infos/DVS_diffs")
+                    ImageHandling.save_img(cur_img, f"img_{i}", f"{case_test_path}/dvs_infos/DVS_frames")
+                    ImageHandling.save_img(current_diff_img, f"diff_{i}", f"{case_test_path}/dvs_infos/DVS_diffs")
 
                 # 3 - Compute Gradient and Ls 
                 grad_Ix, grad_Iy = ImageHandling.get_grads_visp(gray_cur, self.FX, self.FY)
@@ -340,25 +343,233 @@ class IbvsTools :
 
 
 
+
+
+
+
+    def border_safe_indices(self, kpts_img1, kpts_img2, mask1, mask2, margin=10):
+        """
+        Return the indices of matches whose keypoints are safely inside
+        the valid regions of BOTH images.
+
+        A match is kept only if both corresponding keypoints:
+        - are inside their respective image/mask bounds
+        - are at least `margin` pixels away from an invalid mask region
+
+        Returns
+        -------
+        safe : np.ndarray, shape (N,), dtype=bool
+            Boolean mask indicating the matches to keep.
+        """
+
+        if mask1 is None :
+            mask1 = MyUtils.get_dummy_mask(self.CAM_W, self.CAM_H)
+
+        if mask2 is None :
+            mask2 = MyUtils.get_dummy_mask(self.CAM_W, self.CAM_H)
+
+        kpts1 = np.asarray(kpts_img1).astype(np.int32)
+        kpts2 = np.asarray(kpts_img2).astype(np.int32)
+        mask1 = np.asarray(mask1, dtype=bool)
+        mask2 = np.asarray(mask2, dtype=bool)
+
+        # Distance from each valid pixel to the nearest invalid region
+        dist1 = distance_transform_edt(mask1)
+        dist2 = distance_transform_edt(mask2)
+
+        x1, y1 = kpts1[:, 0], kpts1[:, 1]
+        x2, y2 = kpts2[:, 0], kpts2[:, 1]
+
+        h1, w1 = mask1.shape
+        h2, w2 = mask2.shape
+
+        # Check that keypoints are inside their corresponding masks
+        valid1 = (x1 >= 0) & (x1 < w1) & (y1 >= 0) & (y1 < h1)
+        valid2 = (x2 >= 0) & (x2 < w2) & (y2 >= 0) & (y2 < h2)
+
+        # we init considere all kpts invalid
+        safe1 = np.zeros(len(kpts1), dtype=bool)
+        safe2 = np.zeros(len(kpts2), dtype=bool)
+
+        # then turn the safe ones to true (ones far 10pxls frm borders(masks))
+        safe1[valid1] = dist1[y1[valid1], x1[valid1]] >= margin
+        safe2[valid2] = dist2[y2[valid2], x2[valid2]] >= margin
+
+        # A match is valid only when both sides are safe
+        return safe1 & safe2
+
+
+
+
     @staticmethod
-    def border_safe_indices(kpts_xy, mask, margin=10):
+    def select_distributed_matches(
+        matches_cur,
+        matches_des,
+        img_width,
+        img_height,
+        top_x):
+
         """
-        kpts_xy: (N, 2) array or tensor of (x, y) integer pixel coords
-        mask: 2D bool array, True = valid/inside, False = empty/border
-        margin: min distance (in px) required from the mask border
+        Select spatially distributed matches based on desired-image points.
+
+        matches_cur, matches_des: NumPy arrays with shape (N, 2),
+        containing coordinates in (u, v) format.
         """
-        if isinstance(kpts_xy, torch.Tensor):
-            kpts_xy = kpts_xy.detach().cpu().numpy()
-        kpts_xy = np.asarray(kpts_xy).astype(int)
+        matches_cur = np.asarray(matches_cur)
+        matches_des = np.asarray(matches_des)
 
-        dist = distance_transform_edt(mask)  # distance to nearest False pixel
+        top_x = min(top_x, len(matches_des))
 
-        xs = kpts_xy[:, 0]
-        ys = kpts_xy[:, 1]
-        h, w = mask.shape
-        in_bounds = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        if top_x == 0:
+            return matches_cur[:0], matches_des[:0]
 
-        safe = np.zeros(len(kpts_xy), dtype=bool)
-        safe[in_bounds] = dist[ys[in_bounds], xs[in_bounds]] >= margin
+        # Normalize coordinates by the image dimensions.
+        scale = np.array([img_width, img_height], dtype=np.float64)
+        points = matches_des.astype(np.float64) / scale
 
-        return safe
+        # Start with the point closest to the image centre.
+        center = np.array([0.5, 0.5], dtype=np.float64)
+        first_idx = np.argmin(np.linalg.norm(points - center, axis=1))
+
+        selected_indices = [first_idx]
+
+        min_distances = np.linalg.norm(
+            points - points[first_idx],
+            axis=1)
+
+        min_distances[first_idx] = -1
+
+        # Select the point farthest from all previously selected points.
+        for _ in range(1, top_x):
+            next_idx = np.argmax(min_distances)
+            selected_indices.append(next_idx)
+            new_distances = np.linalg.norm(points - points[next_idx], axis=1)
+            min_distances = np.minimum(min_distances, new_distances)
+            min_distances[selected_indices] = -1
+
+        selected_indices = np.asarray(
+            selected_indices,
+            dtype=np.int64)
+
+        return (matches_cur[selected_indices], matches_des[selected_indices])
+
+
+
+
+
+
+
+
+
+
+    
+
+
+
+
+    @staticmethod
+    def filter_matches_ransac(
+        matches_cur,
+        matches_des,
+        ransac_threshold=2.0,
+        confidence=0.999
+    ):
+        """
+        Remove geometrically inconsistent matches using fundamental-matrix RANSAC.
+
+        Parameters
+        ----------
+        matches_cur : np.ndarray, shape (N, 2)
+            Matched (u, v) coordinates in the current image.
+
+        matches_des : np.ndarray, shape (N, 2)
+            Corresponding coordinates in the desired image.
+
+        ransac_threshold : float
+            Maximum epipolar distance in pixels for an inlier.
+
+        confidence : float
+            Confidence used by RANSAC.
+
+        Returns
+        -------
+        inlier_cur : np.ndarray, shape (M, 2)
+        inlier_des : np.ndarray, shape (M, 2)
+        """
+
+        matches_cur = np.asarray(matches_cur, dtype=np.float32)
+        matches_des = np.asarray(matches_des, dtype=np.float32)
+
+        if len(matches_cur) < 8:
+            print(f"RANSAC skipped: only {len(matches_cur)} matches.")
+            return matches_cur, matches_des
+
+        F, inlier_mask = cv2.findFundamentalMat(
+            matches_cur,
+            matches_des,
+            method=cv2.FM_RANSAC,
+            ransacReprojThreshold=ransac_threshold,
+            confidence=confidence
+        )
+
+        if F is None or inlier_mask is None:
+            print("RANSAC failed to estimate the fundamental matrix.")
+            return matches_cur[:0], matches_des[:0]
+
+        inlier_mask = inlier_mask.ravel().astype(bool)
+
+        inlier_cur = matches_cur[inlier_mask]
+        inlier_des = matches_des[inlier_mask]
+
+        print(
+            f"RANSAC: {len(inlier_cur)}/{len(matches_cur)} "
+            f"matches retained "
+            f"({100 * len(inlier_cur) / len(matches_cur):.1f}%)."
+        )
+
+        return inlier_cur, inlier_des
+
+
+
+
+
+
+    def filtered_matching(self, img1, img2, max_matches, mask1 = None, mask2 = None):
+        """
+        input :
+        -imgs nd mask: 2d npy
+        -the mask of the img with holes (in all our matching for now only 1 img got holes)
+        -holes_on2, means the second img got holes instead of the first (so we take the mask2 & matches2 into consid for border's safe indices)
+        
+        -->  border filter with mask, outlier filter ransac, distributed selction
+        
+        return :
+        mtches_img1, mtches_img2 (np (list of corresp 2d coords : ints))
+        """
+
+        img1_kpts, img1_desc = self.get_xfeat_kpts(img1)
+        img2_kpts, img2_desc = self.get_xfeat_kpts(img2)
+
+        idxs0, idxs1 = self.xfeat.match(img2_desc, img1_desc)
+        matches_img2 = img2_kpts[idxs0].detach().cpu().numpy()
+        matches_img1 = img1_kpts[idxs1].detach().cpu().numpy()
+
+        if mask1 is None :
+            mask1 = MyUtils.get_dummy_mask(self.CAM_W, self.CAM_H)
+
+        if mask2 is None :
+            mask2 = MyUtils.get_dummy_mask(self.CAM_W, self.CAM_H)
+
+        safe_indices = self.border_safe_indices(matches_img1, matches_img2, mask1, mask2)
+        
+        matches_img2 = matches_img2[safe_indices]
+        matches_img1 = matches_img1[safe_indices]
+
+        matches_img2, matches_img1 = self.filter_matches_ransac(matches_img2, matches_img1, ransac_threshold=2.0, confidence=0.999)
+        
+        matches_img2, matches_img1 = IbvsTools.select_distributed_matches(matches_img2, matches_img1, self.CAM_W, self.CAM_H, top_x=max_matches)
+
+        matches_img2 = matches_img2.astype(np.int32)
+        matches_img1 = matches_img1.astype(np.int32)
+
+        return matches_img1, matches_img2

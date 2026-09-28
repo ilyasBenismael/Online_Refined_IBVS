@@ -452,6 +452,594 @@ def get_total_time(txt_path):
 
 
 
+
+
+
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def extract_2d_errors_and_velocities(ibvs_infos):
+    """
+    Extract the pixel error and 6D velocity at every IBVS iteration.
+
+    Assumed velocity order:
+        [vx, vy, vz, wx, wy, wz]
+
+    Returns
+    -------
+    iterations : np.ndarray, shape (K,)
+    errors_2d : np.ndarray, shape (K,)
+    velocities : np.ndarray, shape (K, 6)
+    """
+
+    iterations = sorted(ibvs_infos.keys())
+
+    valid_iterations = []
+    errors_2d = []
+    velocities = []
+
+    for iteration in iterations:
+        iteration_info = ibvs_infos[iteration]
+
+        pxl_error = iteration_info[0]
+        velocity = iteration_info[3]
+
+        # Convert pixel error to a scalar
+        pxl_error = np.asarray(
+            pxl_error,
+            dtype=np.float64
+        ).squeeze()
+
+        if pxl_error.ndim == 0:
+            error_value = float(pxl_error)
+        else:
+            # If pxl_error is an error vector, plot its L2 norm
+            error_value = float(
+                np.linalg.norm(pxl_error.reshape(-1))
+            )
+
+        # Convert V from (6,), (6,1), etc. into (6,)
+        velocity = np.asarray(
+            velocity,
+            dtype=np.float64
+        ).reshape(-1)
+
+        if velocity.size != 6:
+            print(
+                f"Skipping iteration {iteration}: "
+                f"expected velocity with 6 elements, "
+                f"but got shape {np.asarray(iteration_info[3]).shape}"
+            )
+            continue
+
+        if (
+            not np.isfinite(error_value)
+            or not np.isfinite(velocity).all()
+        ):
+            print(
+                f"Skipping iteration {iteration}: "
+                "non-finite error or velocity"
+            )
+            continue
+
+        valid_iterations.append(iteration)
+        errors_2d.append(error_value)
+        velocities.append(velocity)
+
+    if not valid_iterations:
+        raise ValueError(
+            "No valid IBVS errors and velocities were found."
+        )
+
+    return (
+        np.asarray(valid_iterations),
+        np.asarray(errors_2d),
+        np.asarray(velocities)
+    )
+
+
+
+
+
+
+
+
+
+def plot_velocities_vs_iter(
+    iterations,
+    velocities,
+    title,
+    save_path
+):
+    """
+    Plot vx, vy, vz, wx, wy and wz in one figure.
+    """
+
+    velocities = np.asarray(
+        velocities,
+        dtype=np.float64
+    )
+
+    if velocities.ndim != 2 or velocities.shape[1] != 6:
+        raise ValueError(
+            "velocities must have shape (N, 6), "
+            f"but got {velocities.shape}"
+        )
+
+    velocity_names = [
+        r"$v_x$",
+        r"$v_y$",
+        r"$v_z$",
+        r"$\omega_x$",
+        r"$\omega_y$",
+        r"$\omega_z$"
+    ]
+
+    colors = [
+        "tab:red",
+        "tab:green",
+        "tab:blue",
+        "tab:orange",
+        "tab:purple",
+        "tab:brown"
+    ]
+
+    linestyles = [
+        "-",
+        "-",
+        "-",
+        "--",
+        "--",
+        "--"
+    ]
+
+    plt.figure(figsize=(12, 6))
+
+    for component_index in range(6):
+        plt.plot(
+            iterations,
+            velocities[:, component_index],
+            label=velocity_names[component_index],
+            color=colors[component_index],
+            linestyle=linestyles[component_index],
+            linewidth=1.3,
+            alpha=0.9
+        )
+
+    # Horizontal zero line helps reveal sign changes and oscillations
+    plt.axhline(
+        y=0.0,
+        color="black",
+        linestyle=":",
+        linewidth=1.0,
+        alpha=0.7
+    )
+
+    plt.xlabel("IBVS iteration")
+    plt.ylabel("Camera velocity")
+    plt.title(title)
+
+    plt.grid(
+        True,
+        linestyle="--",
+        alpha=0.35
+    )
+
+    plt.legend(
+        ncol=3,
+        loc="best"
+    )
+
+    plt.tight_layout()
+    plt.savefig(
+        save_path,
+        dpi=300,
+        bbox_inches="tight"
+    )
+    plt.close()
+
+
+
+
+
+
+def find_first_curve_difference(
+    iterations1,
+    values1,
+    iterations2,
+    values2,
+    tolerance=1e-10
+):
+    values1_by_iter = dict(
+        zip(iterations1, values1)
+    )
+
+    values2_by_iter = dict(
+        zip(iterations2, values2)
+    )
+
+    common_iterations = sorted(
+        set(values1_by_iter)
+        & set(values2_by_iter)
+    )
+
+    for iteration in common_iterations:
+        difference = abs(
+            values1_by_iter[iteration]
+            - values2_by_iter[iteration]
+        )
+
+        if difference > tolerance:
+            return iteration, difference
+
+    return None, 0.0
+
+
+
+
+
+def save_representation_comparison_plots(
+    base_dir,
+    scene_name,
+    case_nbr
+):
+    """
+    Compare Cloud, Mesh and 3DGS for one scenario.
+
+    Reads:
+        <scene>_case<case>_cloud/ibvs_infos.npy
+        <scene>_case<case>_mesh/ibvs_infos.npy
+        <scene>_case<case>_gs/ibvs_infos.npy
+
+    Saves into:
+        <base_dir>/<scene_name>/represenations_comparison/
+    """
+
+    representation_settings = {
+        "Cloud": {
+            "folder_suffix": "cloud",
+            "color": "tab:orange"
+        },
+        "Mesh": {
+            "folder_suffix": "mesh",
+            "color": "tab:green"
+        },
+        "3DGS": {
+            "folder_suffix": "gs",
+            "color": "tab:blue"
+        }
+    }
+
+    comparison_data = {}
+
+    # ------------------------------------------------------------------
+    # Load IBVS data for the three representations
+    # ------------------------------------------------------------------
+
+    for representation, settings in representation_settings.items():
+        case_folder_name = (
+            f"{scene_name}_case{case_nbr}_"
+            f"{settings['folder_suffix']}"
+        )
+
+        ibvs_infos_path = os.path.join(
+            base_dir,
+            scene_name,
+            case_folder_name,
+            IBVS_INFOS_FILENAME
+        )
+
+        if not os.path.exists(ibvs_infos_path):
+            raise FileNotFoundError(
+                f"IBVS information not found: {ibvs_infos_path}"
+            )
+
+        ibvs_infos = np.load(
+            ibvs_infos_path,
+            allow_pickle=True
+        ).item()
+
+        iterations, errors_2d, velocities = (
+            extract_2d_errors_and_velocities(
+                ibvs_infos
+            )
+        )
+
+        comparison_data[representation] = {
+            "iterations": iterations,
+            "errors_2d": errors_2d,
+            "velocities": velocities,
+            "color": settings["color"]
+        }
+
+    # ------------------------------------------------------------------
+    # Create output directory
+    # ------------------------------------------------------------------
+
+    comparison_dir = os.path.join(
+        base_dir,
+        scene_name,
+        "represenations_comparison"
+    )
+
+    os.makedirs(
+        comparison_dir,
+        exist_ok=True
+    )
+
+
+
+
+
+    # part to check overlapping curves ______________________________________________
+    gs_data = comparison_data["3DGS"]
+
+    for representation in ["Mesh", "Cloud"]:
+        representation_data = comparison_data[representation]
+
+        first_difference, difference_value = (
+            find_first_curve_difference(
+                gs_data["iterations"],
+                gs_data["errors_2d"],
+                representation_data["iterations"],
+                representation_data["errors_2d"],
+                tolerance=1e-8
+            )
+        )
+
+        if first_difference is None:
+            print(
+                f"{scene_name} case {case_nbr}: "
+                f"{representation} and 3DGS 2D-error curves "
+                "are identical over all common iterations."
+            )
+        else:
+            print(
+                f"{scene_name} case {case_nbr}: "
+                f"{representation} first differs from 3DGS at "
+                f"iteration {first_difference}; "
+                f"absolute difference = {difference_value:.12e}"
+            )
+    #__________________________________________________________        
+
+
+
+
+    # ------------------------------------------------------------------
+    # Plot 1: 2D error comparison
+    # ------------------------------------------------------------------
+
+    plt.figure(figsize=(10, 6))
+
+    for representation, data in comparison_data.items():
+        plt.plot(
+            data["iterations"],
+            data["errors_2d"],
+            label=representation,
+            color=data["color"],
+            linewidth=1.1,
+            alpha=0.9
+        )
+
+    plt.xlabel("IBVS iteration")
+    plt.ylabel("2D feature error")
+
+    plt.title(
+        f"{scene_name.capitalize()} Scenario {case_nbr}: "
+        "2D feature error"
+    )
+
+    plt.grid(
+        True,
+        linestyle="--",
+        alpha=0.35
+    )
+
+    plt.legend()
+    plt.tight_layout()
+
+    error_save_path = os.path.join(
+        comparison_dir,
+        f"case{case_nbr}_2d_comparison.png"
+    )
+
+    plt.savefig(
+        error_save_path,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close()
+
+    # ------------------------------------------------------------------
+    # Velocity information
+    # ------------------------------------------------------------------
+
+    velocity_names = [
+        r"$v_x$",
+        r"$v_y$",
+        r"$v_z$",
+        r"$\omega_x$",
+        r"$\omega_y$",
+        r"$\omega_z$"
+    ]
+
+    velocity_filenames = [
+        "vx",
+        "vy",
+        "vz",
+        "wx",
+        "wy",
+        "wz"
+    ]
+
+    # ------------------------------------------------------------------
+    # Plots 2–7: save every velocity component separately
+    # ------------------------------------------------------------------
+
+    for component_index in range(6):
+        plt.figure(figsize=(10, 5))
+
+        for representation, data in comparison_data.items():
+            plt.plot(
+                data["iterations"],
+                data["velocities"][:, component_index],
+                label=representation,
+                color=data["color"],
+                linewidth=1.0,
+                alpha=0.9
+            )
+
+        plt.axhline(
+            y=0.0,
+            color="black",
+            linestyle=":",
+            linewidth=0.8,
+            alpha=0.7
+        )
+
+        plt.xlabel("IBVS iteration")
+
+        if component_index < 3:
+            plt.ylabel("Linear velocity")
+        else:
+            plt.ylabel("Angular velocity")
+
+        plt.title(
+            f"{scene_name.capitalize()} Scenario {case_nbr}: "
+            f"{velocity_names[component_index]}"
+        )
+
+        plt.grid(
+            True,
+            linestyle="--",
+            alpha=0.35
+        )
+
+        plt.legend()
+        plt.tight_layout()
+
+        component_save_path = os.path.join(
+            comparison_dir,
+            (
+                f"case{case_nbr}_"
+                f"{velocity_filenames[component_index]}"
+                "_comparison.png"
+            )
+        )
+
+        plt.savefig(
+            component_save_path,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close()
+
+    # ------------------------------------------------------------------
+    # Additional combined 2x3 velocity figure
+    # ------------------------------------------------------------------
+
+    figure, axes = plt.subplots(
+        nrows=2,
+        ncols=3,
+        figsize=(15, 7),
+        sharex=True
+    )
+
+    axes = axes.flatten()
+
+    for component_index, axis in enumerate(axes):
+        for representation, data in comparison_data.items():
+            axis.plot(
+                data["iterations"],
+                data["velocities"][:, component_index],
+                label=representation,
+                color=data["color"],
+                linewidth=0.9,
+                alpha=0.9
+            )
+
+        axis.axhline(
+            y=0.0,
+            color="black",
+            linestyle=":",
+            linewidth=0.7,
+            alpha=0.7
+        )
+
+        axis.set_title(
+            velocity_names[component_index]
+        )
+
+        axis.set_xlabel(
+            "IBVS iteration"
+        )
+
+        if component_index < 3:
+            axis.set_ylabel(
+                "Linear velocity"
+            )
+        else:
+            axis.set_ylabel(
+                "Angular velocity"
+            )
+
+        axis.grid(
+            True,
+            linestyle="--",
+            alpha=0.3
+        )
+
+    # Use only one common legend
+    legend_handles, legend_labels = (
+        axes[0].get_legend_handles_labels()
+    )
+
+    figure.legend(
+        legend_handles,
+        legend_labels,
+        loc="upper center",
+        ncol=3,
+        bbox_to_anchor=(0.5, 1.01)
+    )
+
+    figure.suptitle(
+        f"{scene_name.capitalize()} Scenario {case_nbr}: "
+        "camera velocity comparison",
+        y=1.04
+    )
+
+    figure.tight_layout()
+
+    combined_velocity_save_path = os.path.join(
+        comparison_dir,
+        f"case{case_nbr}_6d_comparison.png"
+    )
+
+    figure.savefig(
+        combined_velocity_save_path,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close(figure)
+
+    print(
+        f"Representation comparison plots saved to: "
+        f"{comparison_dir}"
+    )
+
+
+
+
+
+
+
+
 # Main PIPELINE  =======================================================================================================
 
 
@@ -463,16 +1051,16 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     gs2s_dir = f"{case_path}/gs2s"
 
     # Create results directory and results.txt if it doesn't exist
-    """
+
     os.makedirs(results_dir, exist_ok=True)
     if not os.path.exists(txt_path):
         open(txt_path, "w").close()
-    """
+    
     
 
     print(f"--- Processing {scene_name} case {case_nbr} ---")
 
-    """
+    
     nbr_des = get_last_des_nbr(f"{case_path}/desired_imgs")
     nbr_kfs = get_last_kf_nbr(f"{case_path}/sfm/images")
     total_time = get_total_time(f"{case_path}/results.txt")
@@ -483,6 +1071,7 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     add_line_to_text(txt_path, f"total_time = {total_time}")
 
 
+    """
     # ------------------------------------------------------------------
     # des0 vs GT_des_img_masked
     # ------------------------------------------------------------------
@@ -517,13 +1106,13 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     add_line_to_text(txt_path, f"middes_GTdes_ssim = {ssim_val}")
     add_line_to_text(txt_path, f"middes_GTdes_psnr = {psnr_val}")
     add_line_to_text(txt_path, f"middes_GTdes_lpips = {lpips_val}")
-
-
+    """
+    
     # ------------------------------------------------------------------
     # final desired vs GT_des
     # ------------------------------------------------------------------
     last_des = get_last_des(desired_dir)
-
+    gt_des = ImageHandling.load_np_img(f"{desired_dir}/GT_des.png")
     ssim_val, psnr_val, lpips_val = ImageHandling.calc_imgs_sim_metrics(last_des, gt_des, 3)
     add_line_to_text(txt_path, f"finaldes_GTdes_ssim = {ssim_val}")
     add_line_to_text(txt_path, f"finaldes_GTdes_psnr = {psnr_val}")
@@ -531,7 +1120,7 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
 
     add_line_to_text(txt_path, "----------- ibvs infos -------------")
     
-    """
+    
 
     # get GT / init poses
     configs_path = os.path.join(case_path, CONFIGS_FILENAME)
@@ -574,31 +1163,40 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
     add_line_to_text(txt_path, f"R_diff_last_itr_deg = {R_diffs_full[last_iter_full]}")
     add_line_to_text(txt_path, f"t_diff_last_itr_norm = {t_diffs_full[last_iter_full]}")
 
-    """
 
-    # Get IBVS infos until iter_X (errs<0.1)________________________________________
-    itr_X = get_itr_X(ibvs_infos)
-    add_line_to_text("--- infos until_itrX ---", txt_path)
-    add_line_to_text(f"itr_X = {itr_X}", txt_path)
+    # Extract 2D errors and 6D velocities
+    (iters_ibvs, errors_2d, velocities_6d) = extract_2d_errors_and_velocities(ibvs_infos)
 
-    # save ttle itrs nd condit nbr to txt until itr_X
-    total_nbr_itrs_X = get_total_nbr_of_itrs(ibvs_infos, until_iter=itr_X)
-    add_line_to_text(f"total_nbr_itrs_until_X = {total_nbr_itrs_X}", txt_path)
-    avrg_condit_nbr_X = get_avrg_condit_nbr(ibvs_infos, until_iter=itr_X)
-    add_line_to_text(f"avrg_condit_nbr_until_X = {avrg_condit_nbr_X}", txt_path)
 
-    # save all R diffs and t diffs until itr_X
-    iters_X, R_diffs_X, t_diffs_X = compute_pose_errors_per_iter(
-        ibvs_infos, R_gt, t_gt, t_diff_gt_init, until_iter=itr_X)
-    R_diff_X_path = os.path.join(results_dir, "R_diff_until_itrX.npy")
-    t_diff_X_path = os.path.join(results_dir, "t_diff_until_itrX.npy")
-    np.save(R_diff_X_path, R_diffs_X)
-    np.save(t_diff_X_path, t_diffs_X)
 
-    #save irs_x's R nd t diff to txt
-    add_line_to_text(f"R_diff_itrX_deg = {R_diffs_X[itr_X]}", txt_path)
-    add_line_to_text(f"t_diff_itrX_norm = {t_diffs_X[itr_X]}", txt_path)
-    """
+    # Plot 2D feature error versus iteration
+    errors_2d_dict = dict(
+        zip(
+            iters_ibvs.tolist(),
+            errors_2d.tolist()))
+
+    plot_error_vs_iter(
+        iters_ibvs,
+        errors_2d_dict,
+        ylabel="2D feature error",
+        title=(
+            f"{scene_name} case{case_nbr} - "
+            "2D feature error vs iteration"),
+        save_path=os.path.join(
+            results_dir,
+            "error_2d_vs_iter.png"))
+
+
+    # Plot all six velocity components versus iteration
+    plot_velocities_vs_iter(
+        iters_ibvs,
+        velocities_6d,
+        title=(
+            f"{scene_name} case{case_nbr} - "
+            "6D camera velocity vs iteration"),
+        save_path=os.path.join(
+            results_dir,
+            "velocity_6d_vs_iter.png"))
 
 
     # Plot & save the 2 errors R,t ________________________________________________
@@ -614,20 +1212,7 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
         ylabel="Normalized t diff",
         title=f"{scene_name} case{case_nbr} - t diff vs iter (full run)",
         save_path=os.path.join(results_dir, "t_diff_full.png"),)
-    
-    """
-    plot_error_vs_iter(
-        iters_X, R_diffs_X,
-        ylabel="R diff (deg)",
-        title=f"{scene_name} case{case_nbr} - R diff vs iter (until itr_X={itr_X})",
-        save_path=os.path.join(results_dir, "R_diff_until_itrX.png"),)
-    
-    plot_error_vs_iter(
-        iters_X, t_diffs_X,
-        ylabel="Normalized t diff",
-        title=f"{scene_name} case{case_nbr} - t diff vs iter (until itr_X={itr_X})",
-        save_path=os.path.join(results_dir, "t_diff_until_itrX.png"),)
-    """
+
     print(f"    -> done. results saved to {results_dir}")
 
 
@@ -728,6 +1313,7 @@ def process_case(case_path: str, scene_name: str, case_nbr: int):
 
 def main():
 
+    """
     all_metrics = {k: [] for k in METRICS}
 
     for scene_name in SCENE_NAMES:
@@ -750,16 +1336,30 @@ def main():
                 f"{k}: "
                 f"{vals.mean():.4f} ± {vals.std():.4f}\n")
     return
+    
 
-    """
 
+
+    SCENE_NAMES = ["playroom"]
+    CASE_NBRS = [1, 2, 3]
     for scene_name in SCENE_NAMES:
         for case_nbr in CASE_NBRS:
-            case_folder_name = f"{scene_name}_case{case_nbr}"
+            case_folder_name = f"{scene_name}_case{case_nbr}_mesh"
             case_path = os.path.join(BASE_DIR, scene_name, case_folder_name)
             process_case(case_path, scene_name, case_nbr)
-   
+    
+
     """
+    SCENE_NAMES = ["playroom"]
+    CASE_NBRS = [1, 2, 3]
+    # New Cloud/Mesh/3DGS comparison plots
+    for scene_name in SCENE_NAMES:
+        for case_nbr in CASE_NBRS:
+            save_representation_comparison_plots(
+                base_dir=BASE_DIR,
+                scene_name=scene_name,
+                case_nbr=case_nbr)
+
 
 
 if __name__ == "__main__":

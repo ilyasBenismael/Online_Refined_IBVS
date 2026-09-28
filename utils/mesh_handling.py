@@ -156,6 +156,7 @@ class MeshHandling :
 
 
 
+
         
     def render_mesh_pic(self, scene_compos, extrins) :
 
@@ -194,6 +195,74 @@ class MeshHandling :
 
         return np.asarray(img), np.asarray(depth) 
 
+
+
+
+
+
+    def render_mesh_pic_withnoshad(self, scene_compos, camera_to_world):
+
+        # Open3D expects world-to-camera extrinsic
+        world_to_camera = np.linalg.inv(camera_to_world)
+
+        cam_params = o3d.camera.PinholeCameraParameters()
+        cam_params.extrinsic = world_to_camera
+        cam_params.intrinsic = self.intrins_o3d
+
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(
+            window_name="Mesh render",
+            width=self.CAM_W,
+            height=self.CAM_H,
+            visible=False,
+        )
+
+        opt = vis.get_render_option()
+        opt.background_color = np.array([0.0, 0.0, 0.0])
+
+        # Equivalent to MeshLab's "Shading: None"
+        opt.light_on = False
+
+        # Explicitly use the mesh's vertex colors
+        opt.mesh_color_option = o3d.visualization.MeshColorOption.Color
+
+        opt.mesh_show_wireframe = False
+        opt.mesh_show_back_face = True
+
+        for geom in scene_compos:
+            if isinstance(geom, o3d.geometry.TriangleMesh):
+                print(
+                    f"Mesh: vertices={len(geom.vertices)}, "
+                    f"triangles={len(geom.triangles)}, "
+                    f"has colors={geom.has_vertex_colors()}, "
+                    f"has normals={geom.has_vertex_normals()}"
+                )
+
+            vis.add_geometry(geom, reset_bounding_box=True)
+
+        ctr = vis.get_view_control()
+        success = ctr.convert_from_pinhole_camera_parameters(
+            cam_params,
+            allow_arbitrary=True,
+        )
+
+        if not success:
+            print("WARNING: camera parameters were not applied correctly")
+
+        vis.poll_events()
+        vis.update_renderer()
+
+        image = np.asarray(
+            vis.capture_screen_float_buffer(do_render=True)
+        )
+
+        depth = np.asarray(
+            vis.capture_depth_float_buffer(do_render=True)
+        )
+
+        vis.destroy_window()
+
+        return image, depth
 
 
 
@@ -512,3 +581,245 @@ class MeshHandling :
         centers = min_corner + (unique_indices + 0.5) * voxel_size
 
         return centers
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+    def align_clouds_icp(
+        source_cloud,
+        target_cloud,
+        max_correspondence_distance=0.05,
+        max_iterations=50,
+        voxel_size=None) :
+
+        """
+        Align source_points toward target_points using rigid point-to-point ICP.
+
+        Parameters
+        ----------
+        o3d_source_points : np.ndarray
+        o3d_target_points : np.ndarray
+        max_correspondence_distance : float
+            Maximum distance allowed between corresponding points.
+            Uses the same unit as the point clouds.
+        max_iterations : int
+            Maximum number of ICP iterations.
+        voxel_size : float or None
+            Downsampling voxel size. If None, no downsampling is applied.
+
+        Returns
+        -------
+        R : np.ndarray
+            Estimated rotation, shape (3, 3).
+        t : np.ndarray
+            Estimated translation, shape (3,).
+        T : np.ndarray
+            Complete rigid transformation, shape (4, 4).
+        """
+
+        # optio downsampling
+        if voxel_size is not None:
+            source_icp = source_cloud.voxel_down_sample(voxel_size)
+            target_icp = target_cloud.voxel_down_sample(voxel_size)
+        else:
+            source_icp = source_cloud
+            target_icp = target_cloud
+
+        # Clouds are already approximately aligned, so start from identity
+        T_initial = np.eye(4)
+
+        result = o3d.pipelines.registration.registration_icp(
+            source_icp,
+            target_icp,
+            max_correspondence_distance,
+            T_initial,
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(
+                relative_fitness=1e-6,
+                relative_rmse=1e-6,
+                max_iteration=max_iterations))
+
+        T = result.transformation
+        R = T[:3, :3]
+        t = T[:3, 3]
+
+        return R, t
+
+
+
+
+
+
+
+
+
+
+
+
+
+        
+    @staticmethod
+    def get_focal_point(cloud_in_cam_frame, mask, area_size=10):
+        """
+        Return the valid 3D point whose pixel is closest to the image centre.
+
+        Parameters
+        ----------
+        cloud_in_cam_frame : np.ndarray, shape (H, W, 3)
+            Organized point cloud expressed in the camera frame.
+
+        mask : np.ndarray, shape (H, W), dtype bool
+            Invalid-point mask:
+            True  -> depth edge or low-confidence point.
+            False -> valid point.
+
+        area_size : int
+            Size of the central search area in pixels [square].
+
+        Returns
+        -------
+        focal_point : np.ndarray, shape (3,)
+            Selected 3D focal point in the camera frame.
+
+        pixel_coordinates : tuple[int, int]
+            Selected pixel coordinates in (u, v) format.
+        """
+
+        cloud = np.asarray(cloud_in_cam_frame, dtype=np.float64)
+        mask = np.asarray(mask, dtype=bool)
+
+        if cloud.ndim != 3 or cloud.shape[2] != 3:
+            raise ValueError("cloud_in_cam_frame must have shape (H, W, 3).")
+
+        if mask.shape != cloud.shape[:2]:
+            raise ValueError("mask must have the same (H, W) shape as the point cloud.")
+
+        height, width = cloud.shape[:2]
+        area_height = area_width =  area_size
+
+        if area_height <= 0 or area_width <= 0:
+            raise ValueError("area_size values must be positive.")
+
+        area_height = min(area_height, height)
+        area_width = min(area_width, width)
+
+        center_v = height // 2
+        center_u = width // 2
+
+        v_min = max(0, center_v - area_height // 2)
+        v_max = min(height, v_min + area_height)
+
+        u_min = max(0, center_u - area_width // 2)
+        u_max = min(width, u_min + area_width)
+
+        # Readjust the beginning when the area touches an image boundary.
+        v_min = max(0, v_max - area_height)
+        u_min = max(0, u_max - area_width)
+
+        central_cloud = cloud[v_min:v_max, u_min:u_max]
+        central_mask = mask[v_min:v_max, u_min:u_max]
+
+        finite = np.all(np.isfinite(central_cloud), axis=2)
+
+        # Assumes that valid points are in front of the camera: Z > 0.
+        positive_depth = central_cloud[..., 2] > 0
+        valid = central_mask & finite & positive_depth
+        valid_v, valid_u = np.nonzero(valid)
+
+        if len(valid_v) == 0:
+            raise ValueError("No valid 3D point was found inside the selected central area.")
+
+        # Convert local crop coordinates to complete-image coordinates.
+        image_v = valid_v + v_min
+        image_u = valid_u + u_min
+
+        # Squared pixel distance from the image centre.
+        distances_squared = ((image_u - center_u) ** 2 + (image_v - center_v) ** 2)
+        closest_index = np.argmin(distances_squared)
+
+        selected_v = image_v[closest_index]
+        selected_u = image_u[closest_index]
+        focal_point = cloud[selected_v, selected_u].copy()
+
+        return focal_point
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+    def get_corresp_3d_point_matches(matches_img1, matches_img2, moge_mask1, moge_mask2, all_moge_points1, all_moge_points2) :
+        """
+        return matched_points3d1, matched_points3d2 np : (H, W, 3)
+        """
+        # get the indices(x,y) of the xfeat matched 2d points on img1 and img2
+        x1 = matches_img1[:, 0]
+        y1 = matches_img1[:, 1]
+        x2 = matches_img2[:, 0]
+        y2 = matches_img2[:, 1]
+
+        # return the moge mask for the xfeat points (True for the valid xfeat points) => 1D [T, F, T..] lngth of the xfeat points
+        valid1 = moge_mask1[y1, x1]
+        valid2 = moge_mask2[y2, x2]
+        valid = valid1 & valid2
+
+        H, W = moge_mask1.shape
+        all_moge_points1 = all_moge_points1.reshape(H, W, 3)
+        all_moge_points2 = all_moge_points2.reshape(H, W, 3)
+
+        # Corresponding 3D points and colors of the valid 2d xfeat matches
+        matched_points3d1 = all_moge_points1[y1, x1][valid]
+        matched_points3d2 = all_moge_points2[y2, x2][valid]
+        return matched_points3d1, matched_points3d2 
+
+
+
+    @staticmethod
+    def get_corresp_3d_points(matches_img, moge_mask, all_moge_points) :
+        """
+        return matched_points3d (H, W, 3)
+        """
+        # get the indices(x,y) of the xfeat matched 2d points on img1
+        x = matches_img[:, 0]
+        y = matches_img[:, 1]
+
+        # return the moge mask for the xfeat points (True for the valid xfeat points) => 1D [T, F, T..] lngth of the xfeat points
+        valid = moge_mask[y, x]
+
+        H, W = moge_mask.shape
+        all_moge_points = all_moge_points.reshape(H, W, 3)
+
+        # Corresponding 3D points and colors of the valid 2d xfeat matches
+        matched_points3d = all_moge_points[y, x][valid]
+        
+        return matched_points3d 
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+

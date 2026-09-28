@@ -19,7 +19,7 @@ class GaussiansHandling :
 
 
     @staticmethod
-    def run_gs_training(sfm_path, output_path, gs_reso = 1, gs_nbr_itrs = 15000):
+    def run_gs_training(sfm_path, output_path, gs_reso = 1, gs_nbr_itrs = 15000, curr_case_gs2_path = None):
         
         import sys, os
         # gaussian_splatting/ is a sibling of scripts/
@@ -38,12 +38,18 @@ class GaussiansHandling :
         pp = PipelineParams(parser)
 
         # Step 2 - Parse only your overrides, everything else gets its default
-        args = parser.parse_args([
+        gs_args = [
             "-s", os.path.abspath(sfm_path),
             "-m", os.path.abspath(output_path),
             "-r", str(gs_reso),
             "--iterations", str(gs_nbr_itrs)           
-        ])
+        ]
+
+        # we pass to gs inria repo (init function) this initplypath holdng the gs2 path of the case
+        if curr_case_gs2_path:
+            gs_args.extend(["--initial_ply_path", os.path.abspath(curr_case_gs2_path)])
+
+        args = parser.parse_args(gs_args)
 
         # Step 3 - Manually set args that belong to __main__ only (not in any ParamGroup)
         args.save_iterations    = [gs_nbr_itrs]
@@ -510,6 +516,5 @@ class GaussiansHandling :
 #         results)
 
 #     return
-
 
 

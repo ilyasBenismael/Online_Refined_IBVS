@@ -303,5 +303,281 @@ class LinAlgeb :
             Transformed pose: T2 @ T1.
         """
         return T2 @ T1
-        
 
+
+
+    @staticmethod
+    def get_relative_transfo_c2w(T1, T2):
+        """
+        Both input poses are camera-to-world.
+        Returns
+        -------
+        T_init_kf : (4,4)
+            KF camera-to-initial-camera transformation.
+            Initial camera therefore becomes identity.
+        """
+        return np.linalg.inv(T1) @ T2
+
+
+
+
+
+    @staticmethod
+    def get_eye_matrix(size_nbr):
+        return np.eye(size_nbr, dtype=np.float64)
+
+
+    @staticmethod
+    def apply_random_translation(
+        translation_range,
+        cam_pose=None):
+        """
+        Apply a random 3D translation whose total magnitude is inside
+        the specified range.
+
+        For translation_range = (a, b):
+
+            a <= sqrt(dx² + dy² + dz²) <= b
+        """
+
+        if cam_pose is None:
+            cam_pose = np.eye(4, dtype=np.float64)
+        else:
+            cam_pose = np.asarray(cam_pose, dtype=np.float64).copy()
+
+        if cam_pose.shape != (4, 4):
+            raise ValueError("cam_pose must have shape (4, 4).")
+
+        min_translation, max_translation = map(
+            float,
+            translation_range
+        )
+
+        rng = np.random.default_rng()
+
+        # Select the total translation distance.
+        distance = rng.uniform(
+            min_translation,
+            max_translation)
+
+        # Generate a random 3D direction.
+        direction = rng.normal(size=3)
+        direction_norm = np.linalg.norm(direction)
+        while direction_norm < 1e-12:
+            direction = rng.normal(size=3)
+            direction_norm = np.linalg.norm(direction)
+
+
+
+        direction /= direction_norm
+
+        # Scale the direction to the selected translation distance.
+        translation = distance * direction
+        dx, dy, dz = translation
+
+        translation_transform = np.eye(4, dtype=np.float64)
+        translation_transform[:3, 3] = translation
+
+        # Apply translation along the camera's local axes.
+        new_cam_pose = cam_pose @ translation_transform
+
+        print(
+            f"Requested translation range: "
+            f"[{min_translation:.6f}, {max_translation:.6f}] m"
+        )
+        print(f"Random translation x: {dx:.6f} m")
+        print(f"Random translation y: {dy:.6f} m")
+        print(f"Random translation z: {dz:.6f} m")
+        print(f"Total 3D translation: "
+            f"{np.linalg.norm(translation):.6f} m")
+
+        return new_cam_pose
+
+
+    
+
+
+
+
+    @staticmethod
+    def look_at_focal_point(cam_pose, focal_point):
+        """
+        Rotate a camera pose so its optical axis points toward a focal point.
+
+        The camera position is unchanged. The shortest rotation that aligns
+        the current camera +Z axis with the focal point is applied, meaning
+        no additional roll around the optical axis is intentionally added.
+
+        Parameters
+        ----------
+        cam_pose : np.ndarray, shape (4, 4)
+            Camera-to-world pose T_wc.
+
+        focal_point : array-like, shape (3,)
+            Focal point expressed in the same world frame as cam_pose.
+
+        Returns
+        -------
+        new_pose : np.ndarray, shape (4, 4)
+            Camera-to-world pose looking toward the focal point.
+        """
+
+
+        # makin sure they in right shape and format
+        cam_pose = np.asarray(cam_pose, dtype=np.float64)
+        focal_point = np.asarray(focal_point, dtype=np.float64).reshape(3)
+
+        if cam_pose.shape != (4, 4):
+            raise ValueError("cam_pose must have shape (4, 4).")
+
+        new_pose = cam_pose.copy()
+        rotation = cam_pose[:3, :3]
+        camera_center = cam_pose[:3, 3]
+
+        # Desired optical-axis direction in the world frame.
+        desired_z = focal_point - camera_center
+        distance = np.linalg.norm(desired_z)
+
+        if distance < 1e-10:
+            raise ValueError("The focal point cannot be equal to the camera centre.")
+
+        desired_z /= distance
+
+        # Current camera optical axis (+Z) expressed in the world frame.
+        current_z = rotation[:, 2]
+        current_z /= np.linalg.norm(current_z)
+
+        cross = np.cross(current_z, desired_z)
+        cross_norm = np.linalg.norm(cross)
+        dot = np.clip(np.dot(current_z, desired_z), -1.0, 1.0)
+
+        if cross_norm < 1e-10:
+            if dot > 0:
+                # The camera is already looking toward the focal point.
+                alignment_rotation = np.eye(3)
+            else:
+                # Current and desired directions are opposite.
+                # Rotate 180 degrees around the current camera X axis.
+                axis = rotation[:, 0]
+                axis /= np.linalg.norm(axis)
+
+                alignment_rotation = (
+                    -np.eye(3) + 2.0 * np.outer(axis, axis)
+                )
+        else:
+            axis = cross / cross_norm
+            angle = np.arctan2(cross_norm, dot)
+
+            # Rodrigues rotation formula.
+            ax, ay, az = axis
+
+            axis_skew = np.array([
+                [0.0, -az,  ay],
+                [az,   0.0, -ax],
+                [-ay,  ax,  0.0]
+            ])
+
+            alignment_rotation = (
+                np.eye(3)
+                + np.sin(angle) * axis_skew
+                + (1.0 - np.cos(angle)) * (axis_skew @ axis_skew)
+            )
+
+        new_rotation = alignment_rotation @ rotation
+
+        # Remove small numerical errors and recover a proper rotation matrix.
+        U, _, Vt = np.linalg.svd(new_rotation)
+        new_rotation = U @ Vt
+
+        if np.linalg.det(new_rotation) < 0:
+            U[:, -1] *= -1
+            new_rotation = U @ Vt
+
+        new_pose[:3, :3] = new_rotation
+
+        print(
+            "Applied look-at rotation angle: "
+            f"{np.degrees(np.arccos(dot)):.6f} degrees"
+        )
+
+        return new_pose
+
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+    def perturb_focal_point(focal_point, noise_range):
+        """
+        Add random noice vector (rand_x, rand_y, ran_z)from the entered range
+
+        Params
+        ----------
+        focal_point : 3d array (focal point)
+
+        noise_range : tuple [a, b]
+
+        Returns
+        -------
+        new focal point 3d np array
+        """
+        focal_point = np.asarray(focal_point, dtype=np.float64).reshape(3)
+
+        if len(noise_range) != 2:
+            raise ValueError("noise_range must be a tuple (min_noise, max_noise).")
+
+        min_noise, max_noise = map(float, noise_range)
+
+        rng = np.random.default_rng()
+        noise = rng.uniform(
+            low=min_noise,
+            high=max_noise,
+            size=3)
+
+        perturbed_focal_point = focal_point + noise
+        print(f"Original focal point:  {focal_point}")
+        print(f"Random noise x:        {noise[0]:.6f} m")
+        print(f"Random noise y:        {noise[1]:.6f} m")
+        print(f"Random noise z:        {noise[2]:.6f} m")
+        print(f"Perturbed focal point: {perturbed_focal_point}")
+
+        return perturbed_focal_point
+
+
+
+
+
+
+
+    @staticmethod
+    def apply_random_z_rotation(cam_pose, angle_range):
+        """
+        Apply a random rotation around the camera's local optical Z-axis.
+
+        angle_range: (min_angle, max_angle) in degrees.
+        """
+        pose = np.asarray(cam_pose, dtype=np.float64).copy()
+        rng = np.random.default_rng()
+
+        angle_deg = rng.uniform(*angle_range)
+        angle = np.deg2rad(angle_deg)
+
+        c, s = np.cos(angle), np.sin(angle)
+
+        rotation_z = np.array([
+            [c, -s, 0.0],
+            [s,  c, 0.0],
+            [0.0, 0.0, 1.0]])
+
+        # Apply around the camera's local optical axis.
+        pose[:3, :3] = pose[:3, :3] @ rotation_z
+        print(f"Random Z rotation: {angle_deg:.3f} degrees")
+
+        return pose

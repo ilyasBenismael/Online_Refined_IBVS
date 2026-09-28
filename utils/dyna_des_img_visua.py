@@ -6,6 +6,356 @@ from datetime import datetime
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+
+
+# ============================================================
+# PARSER
+# ============================================================
+
+def parse_log_file(log_path):
+    events = []
+
+    with open(log_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+
+            if not line or line.startswith("+"):
+                continue
+
+            m = re.search(
+                r"🔵(\d+)-IBVS:\s*2d_err:\s*([0-9.]+)",
+                line
+            )
+            if m:
+                iter_num = int(m.group(1))
+                err_2d = float(m.group(2))
+                m_time = re.search(r"(\d{2}:\d{2}:\d{2}\.\d+)", line)
+                if m_time:
+                    t = datetime.strptime(m_time.group(1), "%H:%M:%S.%f")
+                    events.append({"type": "ibvs", "iter": iter_num, "err": err_2d, "time": t})
+                continue
+
+            if "Got a new des_img" in line:
+                m_num = re.search(r"des_img\((\d+)\)", line)
+                m_time = re.search(r"(\d{2}:\d{2}:\d{2}\.\d+)", line)
+                if m_num and m_time:
+                    t = datetime.strptime(m_time.group(1), "%H:%M:%S.%f")
+                    events.append({"type": "des_img", "idx": int(m_num.group(1)), "time": t})
+                continue
+
+            if "Received KF" in line:
+                m_num = re.search(r"Received KF(\d+)", line)
+                m_time = re.search(r"(\d{2}:\d{2}:\d{2}\.\d+)", line)
+                if m_num and m_time:
+                    t = datetime.strptime(m_time.group(1), "%H:%M:%S.%f")
+                    events.append({"type": "kf", "idx": int(m_num.group(1)), "time": t})
+
+    events.sort(key=lambda e: e["time"])
+    return events
+
+
+# ============================================================
+# IMAGE HELPERS
+# ============================================================
+
+def load_rgb(path):
+    if not os.path.exists(path):
+        print(f"[WARNING] Missing file: {path}")
+        return np.zeros((480, 640, 3), dtype=np.uint8)
+    img = cv2.imread(path)
+    if img is None:
+        print(f"[WARNING] Failed to load: {path}")
+        return np.zeros((480, 640, 3), dtype=np.uint8)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+def get_first_numbered_image(folder, prefix):
+    if not os.path.exists(folder):
+        return np.zeros((480, 640, 3), dtype=np.uint8)
+
+    pattern = re.compile(
+        rf"^{re.escape(prefix)}(\d+)\.(png|jpg|jpeg)$",
+        re.IGNORECASE,
+    )
+    imgs = []
+    for filename in os.listdir(folder):
+        match = pattern.match(filename)
+        if match:
+            imgs.append((int(match.group(1)), filename))
+
+    if not imgs:
+        return np.zeros((480, 640, 3), dtype=np.uint8)
+
+    imgs.sort(key=lambda item: item[0])
+    return load_rgb(os.path.join(folder, imgs[0][1]))
+
+
+def update_image_keep_ratio(ax, im_obj, img):
+    h_img, w_img = img.shape[:2]
+    img_ratio = w_img / h_img
+
+    fig = ax.get_figure()
+    fig_w, fig_h = fig.get_size_inches()
+    pos = ax.get_position()
+
+    panel_w = pos.width * fig_w
+    panel_h = pos.height * fig_h
+    panel_ratio = panel_w / panel_h
+
+    if img_ratio >= panel_ratio:
+        fit_w = panel_w
+        fit_h = panel_w / img_ratio
+    else:
+        fit_h = panel_h
+        fit_w = panel_h * img_ratio
+
+    x0 = (panel_w - fit_w) / 2
+    y0 = (panel_h - fit_h) / 2
+    x1 = x0 + fit_w
+    y1 = y0 + fit_h
+
+    im_obj.set_data(img)
+    im_obj.set_extent([x0, x1, y0, y1])
+
+    ax.set_xlim(0, panel_w)
+    ax.set_ylim(0, panel_h)
+
+
+# ============================================================
+# MAIN VISUALIZER
+# ============================================================
+def replay_visualization(
+    log_path,
+    gt_des_img_path,
+    desired_imgs_path,
+    keyframes_path,
+    current_frames_path,
+    matches_path,
+    speedup=1.0,
+    save_video_path=None,
+    video_fps=20,
+):
+    events = parse_log_file(log_path)
+
+    if len(events) == 0:
+        print("No events found.")
+        return
+
+    # ========================================================
+    # FIGURE
+    # ========================================================
+    # Layout: 2 rows x 3 cols.
+    #   Row 0: 3 equal-width panels -> Initial Image | Initial Desired Image | GT des_img
+    #   Row 1: 1 panel spanning all 3 columns -> IBVS Matches (big, same total width as row 0)
+    # Giving row 1 a taller height_ratio makes the bottom image "bigger".
+
+    fig = plt.figure(figsize=(16, 9))
+    fig.patch.set_facecolor("white")
+
+    outer = GridSpec(
+        2, 3, figure=fig,
+        height_ratios=[1, 1.6],
+        hspace=0.15, wspace=0.05,
+    )
+
+    blank_img = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    def make_image_ax(subplot_spec, title):
+        ax = fig.add_subplot(subplot_spec)
+        ax.set_facecolor("white")
+        ax.set_title(title, color="black", fontsize=14, pad=8)
+        ax.axis("off")
+        im = ax.imshow(
+            blank_img,
+            interpolation="nearest",
+            aspect="auto",
+            origin="upper",
+        )
+        return ax, im
+
+    # TOP ROW  –  Initial Image | Initial Desired Image | GT des_img
+    ax_init, im_init = make_image_ax(outer[0, 0], "Initial Image")
+    ax_des,  im_des  = make_image_ax(outer[0, 1], "Initial Estimated Desired Image")
+    ax_gt,   im_gt   = make_image_ax(outer[0, 2], "Ground Truth Desired Image")
+
+    # BOTTOM ROW  –  IBVS Matches (spans full width)
+    ax_matches, im_matches = make_image_ax(outer[1, :], "IBVS Matches")
+
+    # ========================================================
+    # INITIAL DRAW  (one plt.pause to commit layout, then switch
+    #                to flush_events for all subsequent redraws)
+    # ========================================================
+
+    plt.tight_layout()
+    plt.show(block=False)
+    plt.pause(0.05)   # layout commit — only plt.pause call in the hot path
+
+    init_img  = load_rgb(os.path.join(keyframes_path, "init_img.png"))
+    first_des = get_first_numbered_image(desired_imgs_path, "des")
+    gt_img    = load_rgb(gt_des_img_path)
+    first_matches = get_first_numbered_image(matches_path, "")
+
+    update_image_keep_ratio(ax_init,    im_init,    init_img)
+    update_image_keep_ratio(ax_des,     im_des,     first_des)
+    update_image_keep_ratio(ax_gt,      im_gt,      gt_img)
+    update_image_keep_ratio(ax_matches, im_matches, first_matches)
+
+    fig.canvas.draw()
+    fig.canvas.flush_events()
+
+    # ========================================================
+    # VIDEO WRITER (optional)
+    # ========================================================
+
+    video_writer = None
+    if save_video_path:
+        renderer = fig.canvas.get_renderer()
+        w, h = int(renderer.width), int(renderer.height)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        video_writer = cv2.VideoWriter(save_video_path, fourcc, video_fps, (w, h))
+
+    def capture_frame(hold_seconds=0.0):
+        """Grab the current canvas and write it to the video, repeating
+        the frame enough times to hold it on screen for hold_seconds."""
+        if video_writer is None:
+            return
+        renderer = fig.canvas.get_renderer()
+        w, h = int(renderer.width), int(renderer.height)
+        buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        frame = buf.reshape(h, w, 4)
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+        n_repeats = max(1, round(hold_seconds * video_fps))
+        for _ in range(n_repeats):
+            video_writer.write(frame_bgr)
+
+    capture_frame()  # initial state, held for one frame
+
+    # ========================================================
+    # REPLAY EVENTS
+    # ========================================================
+
+    print(f"Loaded {len(events)} events.")
+    print("Starting in 5 seconds...")
+    #time.sleep(5)
+
+    previous_time = events[0]["time"]
+
+    for event in events:
+        dt = (event["time"] - previous_time).total_seconds() / speedup
+
+        # Timestamp when this iteration started — used to subtract
+        # the time already spent on processing from the sleep budget.
+        frame_start = time.perf_counter()
+
+        # ----------------------------------------------------
+        if event["type"] == "des_img":
+            # Initial Desired Image panel is static (set once above),
+            # so later des_img updates are just logged, not drawn.
+            print(f"DES_IMG {event['idx']} (new desired image received)")
+
+        # ----------------------------------------------------
+        elif event["type"] == "kf":
+            pass
+
+        # ----------------------------------------------------
+        elif event["type"] == "ibvs":
+            itr = event["iter"]
+            err = event["err"]
+
+            matches_img_path = os.path.join(matches_path, f"{itr}.png")
+
+            print(f"IBVS {itr} | err={err:.4f}")
+
+            matches_img = load_rgb(matches_img_path)
+            update_image_keep_ratio(ax_matches, im_matches, matches_img)
+
+        # Redraw — flush_events pumps the GUI queue with no forced sleep
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+
+        # Record this frame, held on screen for roughly dt seconds
+        capture_frame(hold_seconds=dt)
+
+        # Sleep only for whatever time budget is left after processing
+        elapsed = time.perf_counter() - frame_start
+        remaining = dt - elapsed
+
+        if remaining > 0.001:
+            time.sleep(remaining)
+
+        previous_time = event["time"]
+
+    if video_writer is not None:
+        video_writer.release()
+        print(f"Video saved to: {save_video_path}")
+
+    print("Replay finished.")
+    plt.show()
+
+
+# ============================================================
+# EXAMPLE
+# ============================================================
+
+case_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/livingroom/livingroom_case2"
+
+replay_visualization(
+    log_path=f"{case_path}/results.txt",
+    gt_des_img_path=f"{case_path}/desired_imgs/GT_des.png",
+    desired_imgs_path=f"{case_path}/desired_imgs",
+    keyframes_path=f"{case_path}/keyframes",
+    current_frames_path=f"{case_path}/ibvs_frames/real_frames",
+    matches_path=f"{case_path}/ibvs_frames/matches_frames",
+    speedup=50.0,
+    save_video_path="/home/user/Bureau/visual_navigation/my_paper/website/public/videos/results/room.mp4",
+    video_fps=20)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""
+
+
+
+
+
+import os
+import re
+import time
+from datetime import datetime
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 
 
@@ -299,7 +649,7 @@ def replay_visualization(
 # EXAMPLE
 # ============================================================
 
-case_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/playroom/playroom_case1"
+case_path = "/home/user/Bureau/visual_navigation/IBVS_CODE/my_results/online_ibvs_test/kitch/playroom_case1_old"
 
 replay_visualization(
     log_path=f"{case_path}/results.txt",
@@ -308,5 +658,7 @@ replay_visualization(
     keyframes_path=f"{case_path}/keyframes",
     current_frames_path=f"{case_path}/ibvs_frames/real_frames",
     matches_path=f"{case_path}/ibvs_frames/matches_frames",
-    speedup=50.0
-)
+    speedup=50.0)
+
+
+"""

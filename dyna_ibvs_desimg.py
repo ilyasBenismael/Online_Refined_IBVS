@@ -736,7 +736,13 @@ def local_gs_loop(shared, kf_queue, des_img_queue, des_img_event) :
                 inria_saved_ply_path = f"{case_test_path}/gs2s/inria_output/point_cloud/iteration_{gs_nbr_itrs}/point_cloud.ply"
  
             _t = time.time()
-            GaussiansHandling.run_gs_training(sfm_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{sfms_path}/sfm{kf_vrsn}", output_path= f"/home/user/Bureau/visual_navigation/IBVS_CODE/{gs2s_dir_path}/inria_output", gs_reso = gs_reso, gs_nbr_itrs = gs_nbr_itrs)
+            GaussiansHandling.run_gs_training(
+                sfm_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{sfms_path}/sfm{kf_vrsn}",
+                output_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{gs2s_dir_path}/inria_output",
+                gs_reso=gs_reso,
+                gs_nbr_itrs=gs_nbr_itrs,
+                initial_ply_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{gs2s_dir_path}",
+            )
             shutil.copy2(inria_saved_ply_path, f"{gs2s_dir_path}/gs2_{i}.ply")
             msg = f"🟢{i}-Trained local_gs for {gs_nbr_itrs} iterations"; dt = time.time()-_t; print(f"{msg} || {dt:.3f} s"); _t = time.time()
             log_to_table(msg, 'gs', dt)
@@ -959,7 +965,13 @@ def main() :
         # Train gs2(i)_1 then save gs2(i)_200
         print(f"✅ Training GS2 for {gs_nbr_itrs} itrs ________________________________")
         _t = time.time()
-        GaussiansHandling.run_gs_training(sfm_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{sfms_path}/sfm{last_kf_nbr}", output_path= f"/home/user/Bureau/visual_navigation/IBVS_CODE/{gs2s_dir_path}/inria_output", gs_reso= gs_reso, gs_nbr_itrs= gs_nbr_itrs)
+        GaussiansHandling.run_gs_training(
+            sfm_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{sfms_path}/sfm{last_kf_nbr}",
+            output_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{gs2s_dir_path}/inria_output",
+            gs_reso=gs_reso,
+            gs_nbr_itrs=gs_nbr_itrs,
+            initial_ply_path=f"/home/user/Bureau/visual_navigation/IBVS_CODE/{gs2s_dir_path}",
+        )
         log(f"Training GS2 for {gs_nbr_itrs} itrs", time.time() - _t, big=True)
 
 

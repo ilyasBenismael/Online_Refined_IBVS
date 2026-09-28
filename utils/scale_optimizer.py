@@ -1,16 +1,29 @@
 import math
 import numpy as np
+
+from utils.gaussians_handling import GaussiansHandling
+from utils.ibvs_tools import IbvsTools
 from utils.image_handling import ImageHandling
+from utils.lin_algeb import LinAlgeb
+from utils.main_visualizer import MainVisualizer
 from utils.mesh_handling import MeshHandling
+from utils.my_utils import MyUtils
+from utils.poses_handling import PosesHandling
+from utils.incremental_tsdf import IncrementalTSDFMesher
 import os
 import matplotlib.pyplot as plt
+from scipy.optimize import least_squares
+
+
+
+
+
+
 
 
 
 
 class ScaleOptimizer :
-
-
 
 
     def __init__(self, case_test_path, S_MIN=0.01, S_MAX=3.0, N_INITIAL=20, N_CANDIDATES=3, NEIGHBOR_RADIUS=1.5, REFINEMENT_FACTOR=10.0, SCALE_THRESHOLD=0.005) :
@@ -228,8 +241,6 @@ class ScaleOptimizer :
 
 
 
-
-
     # Full coarse-to-fine optimization ==========================================================
 
     def optimize(self, pose2, pose1, mesh_handling : MeshHandling, moge_points1_o3d, img2):
@@ -337,3 +348,162 @@ class ScaleOptimizer :
         self._plot_level(level, delta_s, tag="final")
 
         return best_s, best_error
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+    def estimate_translation_scale(T0_c2w, Tk_c2w, points3d, pixels_kf, K, s_init=1.0, robust_loss="huber"):
+
+        """
+        Estimate scale s of the camera translation between T0 and Tk.
+
+        Parameters
+        ----------
+        T0_c2w : (4,4) np.ndarray
+            Camera-to-world pose of I0.
+
+        Tk_c2w : (4,4) np.ndarray
+            Camera-to-world pose of the keyframe.
+            Rotation is assumed correct.
+            Translation direction is assumed correct.
+
+        points3d : (N,3) np.ndarray
+            3D points corresponding to the matches,
+            expressed in the SAME world frame as T0_c2w.
+
+        pixels_kf : (N,2) np.ndarray
+            Observed corresponding pixels [u,v] in the keyframe.
+
+        K : (3,3) np.ndarray
+            Intrinsic matrix used for the target/keyframe projection.
+
+        s_init : float
+            Initial guess for scale.
+
+        Returns
+        -------
+        s_opt : float
+            Estimated translation scale.
+
+        Tk_scaled_c2w : (4,4) np.ndarray
+            Keyframe pose with scaled translation.
+        """
+
+        T0_c2w = np.asarray(T0_c2w, dtype=np.float64)
+        Tk_c2w = np.asarray(Tk_c2w, dtype=np.float64)
+
+        points3d = np.asarray(points3d, dtype=np.float64)
+        pixels_kf = np.asarray(pixels_kf, dtype=np.float64)
+        K = np.asarray(K, dtype=np.float64)
+
+        # Translation displacement from I0 -> KF (expressed in the world frame)
+        t0 = T0_c2w[:3, 3]
+        tk = Tk_c2w[:3, 3]
+        delta_t = tk - t0
+
+        # Keep KF rotation exactly as provided by IBVS
+        Rk = Tk_c2w[:3, :3]
+
+
+        def get_scaled_pose(s):
+            T = np.eye(4)
+            # Rotation does NOT change
+            T[:3, :3] = Rk
+            # Only scale translation relative to T0
+            T[:3, 3] = t0 + s * delta_t
+            return T
+
+
+        def residuals(s_array):
+            s = s_array[0]
+
+            # Build scaled KF pose
+            Tk_scaled_c2w = get_scaled_pose(s)
+
+            # We need world -> camera for projection
+            Tk_scaled_w2c = np.linalg.inv(Tk_scaled_c2w)
+
+            R_w2c = Tk_scaled_w2c[:3, :3]
+            t_w2c = Tk_scaled_w2c[:3, 3]
+
+            # World points -> KF camera
+            points_cam = (R_w2c @ points3d.T).T + t_w2c
+
+            # Keep points in front of camera
+            Z = points_cam[:, 2]
+
+            # Avoid division by zero
+            Z_safe = np.where(np.abs(Z) < 1e-8, 1e-8, Z)
+
+            # Pinhole projection
+            x = points_cam[:, 0] / Z_safe
+            y = points_cam[:, 1] / Z_safe
+            u = K[0, 0] * x + K[0, 2]
+            v = K[1, 1] * y + K[1, 2]
+            pixels_pred = np.column_stack((u, v))
+
+            # Reprojection residual
+            residual = pixels_pred - pixels_kf
+            return residual.reshape(-1)
+
+
+        # Optimize ONLY s
+        result = least_squares(residuals, x0=np.array([s_init]), loss=robust_loss, f_scale=2.0)
+        s_opt = float(result.x[0])
+        Tk_scaled_c2w = get_scaled_pose(s_opt)
+
+
+
+        return s_opt, Tk_scaled_c2w
+
+
+
+
+
+
+
+
+
+
+    
+    @staticmethod
+    def optimize2(init_img, keyframe, init_moge_points, init_moge_mask, ibvs_tools : IbvsTools, K, trans_pose, nbr_kpts = 20) :
+
+        """
+        --input : 
+        init_moge_pose before scaling it just the eye, and the kf moge pose is the calc transfo from ibvs 
+        
+        --> filtered matching, getting corresp 3Ds, solve s for : GT_2D_in_KF = pinhole_projection(R, t, ?s?, K, 3D_points)
+        
+        --return :
+        s
+        """
+        # get the matches (init & kf)
+        matches_init, matches_kf = ibvs_tools.filtered_matching(init_img, keyframe, init_moge_mask, nbr_kpts)
+        img_mtch = ImageHandling.draw_matches(matches_init, matches_kf, init_img, keyframe)
+        #ImageHandling.plot_img(img_mtch)
+
+        # get corresp 3d points
+        corresp_3ds_init_img = MeshHandling.get_corresp_3d_points(matches_init, init_moge_mask, init_moge_points)   
+        print("corresp_3ds_init_img : ", corresp_3ds_init_img)
+
+        init_pose_moge = LinAlgeb.get_eye_matrix(4)
+        kf_pose_moge = trans_pose
+
+        s, kf_pose_moge = ScaleOptimizer.estimate_translation_scale(init_pose_moge, kf_pose_moge, corresp_3ds_init_img, matches_kf, K)
+        print(f"🟢🟢🟢🟢 s is : {s}")
+        return s
+
+
