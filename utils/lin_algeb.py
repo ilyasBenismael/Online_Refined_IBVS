@@ -149,25 +149,20 @@ class LinAlgeb :
     # ------------- Direct transform frame of a point using homog matrix -------------------
 
     @staticmethod
-    def transform_points_to_world(p_in_cam,
-                        cam_homog : np.ndarray) -> List[float]:
-        
-        # Convert to numpy
-        p_in_cam = np.asarray(p_in_cam, dtype=np.float64)
+    def transform_points_to_world(p_in_cam, cam_homog):
+        """Transform Nx3 or HxWx3 camera-frame points to world coordinates while preserving their input shape."""
 
-        # flatten to (H*W,3) if H,W,3)
-        p_in_cam = p_in_cam.reshape(-1, 3)
+        points = np.asarray(p_in_cam, dtype=np.float64)
+        original_shape = points.shape
+        points_flat = points.reshape(-1, 3)
 
-        # (Camera -> World)
-        # p_world = cur_cam_rot * p_cam + cur_cam_trans
-        cam_rot = cam_homog[:3, :3]
-        cam_trans = cam_homog[:3, 3]
+        rotation = np.asarray(cam_homog[:3, :3], dtype=np.float64)
+        translation = np.asarray(cam_homog[:3, 3], dtype=np.float64)
 
-        points_c = []
-        for p in p_in_cam:
-            Rp = LinAlgeb.matvec3(cam_rot, p)
-            points_c.append(LinAlgeb.vec_add(Rp, cam_trans))
-        return np.array(points_c) 
+        points_world = points_flat @ rotation.T + translation
+        return points_world.reshape(original_shape)
+
+
 
 
     # ------------ Inverse transform frame of a point using homog matrix --------------------  
@@ -397,6 +392,48 @@ class LinAlgeb :
     
 
 
+    @staticmethod
+    def apply_rt_on_3dpoints(points, R, t):
+        """
+        Transforms 3D points given as either (N, 3) or (H, W, 3) numpy arrays 
+        using rotation R (3, 3) and translation t (3,).
+        
+        Parameters:
+        -----------
+        points : np.ndarray
+            Input points of shape (N, 3) or (H, W, 3).
+        R : np.ndarray
+            Rotation matrix of shape (3, 3).
+        t : np.ndarray
+            Translation vector of shape (3,).
+            
+        Returns:
+        --------
+        np.ndarray
+            Transformed points in the same shape as the input.
+        """
+        original_shape = points.shape
+        
+        # 1. Validate and flatten to (N, 3) if it's (H, W, 3)
+        if len(original_shape) == 3 and original_shape[2] == 3:
+            H, W, _ = original_shape
+            pts_flat = points.reshape(-1, 3)
+        elif len(original_shape) == 2 and original_shape[1] == 3:
+            pts_flat = points
+        else:
+            raise ValueError(f"Unsupported shape {original_shape}. Expected (N, 3) or (H, W, 3).")
+        
+        # 2. Apply rigid transformation: P_new = (R @ P.T).T + t
+        transformed_flat = (R @ pts_flat.T).T + t
+        
+        # 3. Reshape back to (H, W, 3) if the input was structured
+        if len(original_shape) == 3:
+            return transformed_flat.reshape(original_shape)
+            
+        return transformed_flat
+
+
+
 
 
     @staticmethod
@@ -581,3 +618,33 @@ class LinAlgeb :
         print(f"Random Z rotation: {angle_deg:.3f} degrees")
 
         return pose
+    
+
+
+
+
+    @staticmethod
+    def reshape_to_image(points, H, W):
+        """Reshape points to (H, W, 3)."""
+        return points.reshape(H, W, 3)
+
+
+
+    @staticmethod
+    def reshape_to_flat(points):
+        """Reshape points to (H * W, 3)."""
+        return points.reshape(-1, 3)
+
+
+
+
+
+    
+
+
+
+
+
+
+
+    

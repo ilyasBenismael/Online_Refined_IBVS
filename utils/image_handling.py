@@ -85,7 +85,7 @@ class ImageHandling :
                     show=True, save=False):
 
         numpy_img = None
-        fig, axs = plt.subplots(2, 2, figsize=(10, 10))
+        fig, axs = plt.subplots(2, 2)
 
         axs[0, 0].imshow(img1); axs[0, 0].axis("off"); axs[0, 0].set_title(title1)
         axs[0, 1].imshow(img2); axs[0, 1].axis("off"); axs[0, 1].set_title(title2)
@@ -114,13 +114,17 @@ class ImageHandling :
 
 
     @staticmethod
-    def save_img(img, title, folder_path, assume_rgb=True):
+    def save_img(img, title, folder_path, assume_rgb=True, remove_png=False):
         os.makedirs(folder_path, exist_ok=True)
         img = np.asarray(img, dtype=np.float32)
         img_u8 = (img * 255 if img.mean() <= 1.0 else img).clip(0, 255).astype(np.uint8)
         if assume_rgb:
             img_u8 = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(os.path.join(folder_path, f"{title}.png"), img_u8)
+
+        if remove_png :    
+            cv2.imwrite(os.path.join(folder_path, title), img_u8)
+        else :  
+            cv2.imwrite(os.path.join(folder_path, f"{title}.png"), img_u8)  
 
 
 
@@ -414,7 +418,35 @@ class ImageHandling :
 
 
 
+    @staticmethod
+    def get_front_depth_mask(moge_depth, gs_depth, moge_mask, front_distance=0.05):
+        """
+        Return a Boolean mask marking valid MoGe pixels located at least
+        `front_distance` metres in front of the rendered 3DGS depth.
 
+        Inputs and output have shape (H, W, 1).
+        """
+
+        moge_depth = np.asarray(moge_depth, dtype=np.float64)
+        gs_depth = np.asarray(gs_depth, dtype=np.float64)
+        moge_mask = np.asarray(moge_mask, dtype=bool)
+
+        if moge_depth.shape != gs_depth.shape or moge_depth.shape != moge_mask.shape:
+            raise ValueError("moge_depth, gs_depth and moge_mask must have the same shape")
+
+        valid_depths = (
+            moge_mask
+            & np.isfinite(moge_depth)
+            & np.isfinite(gs_depth)
+            & (moge_depth > 0)
+            & (gs_depth > 0)
+        )
+
+        front_mask = valid_depths & (
+            (gs_depth - moge_depth) >= front_distance
+        )
+
+        return front_mask
 
 
 
@@ -427,3 +459,51 @@ class ImageHandling :
         height, width = img.shape[:2]
         return height, width
 
+
+    @staticmethod
+    def get_front_depth_mask(moge_depth, gs_depth, moge_mask, front_distance=0.05):
+        """
+        Mark a valid MoGe pixel as True when:
+        - the rendered 3DGS depth is zero/missing, or
+        - the MoGe point is at least `front_distance` metres closer than
+        the rendered 3DGS surface.
+
+        Inputs and output have shape (H, W, 1).
+        """
+
+        moge_depth = np.asarray(moge_depth, dtype=np.float64)
+        gs_depth = np.asarray(gs_depth, dtype=np.float64)
+        moge_mask = np.asarray(moge_mask, dtype=bool)
+
+        if moge_depth.shape != gs_depth.shape or moge_depth.shape != moge_mask.shape:
+            raise ValueError("moge_depth, gs_depth and moge_mask must have the same shape")
+
+        # MoGe must contain a valid 3D point
+        valid_moge = (
+            moge_mask
+            & np.isfinite(moge_depth)
+            & (moge_depth > 0)
+        )
+
+        # Zero or non-finite GS depth means no rendered geometry
+        missing_gs_depth = (
+            ~np.isfinite(gs_depth)
+            | (gs_depth <= 0)
+        )
+
+        valid_gs_depth = (
+            np.isfinite(gs_depth)
+            & (gs_depth > 0)
+        )
+
+        # Smaller MoGe depth means the observed point is closer to the camera
+        moge_is_in_front = (
+            valid_gs_depth
+            & ((gs_depth - moge_depth) >= front_distance)
+        )
+
+        front_mask = valid_moge & (
+            missing_gs_depth | moge_is_in_front
+        )
+
+        return front_mask

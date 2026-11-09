@@ -159,6 +159,53 @@ class MyUtils :
 
 
 
+
+
+
+
+    @staticmethod
+    def save_accumulated_arrays(npy_path, storage):
+        """Save accumulated iterations using the original {iteration: array} format."""
+
+        if not storage:
+            return
+
+        data = {}
+
+        # Preserve any data already present in the file
+        if os.path.exists(npy_path):
+            try:
+                data = np.load(npy_path, allow_pickle=True).item()
+            except (EOFError, ValueError, OSError):
+                print(f"Corrupted NPY file replaced: {npy_path}")
+
+        data.update(storage)
+        np.save(npy_path, data, allow_pickle=True)
+
+
+
+
+    @staticmethod
+    def accumulate_array(storage, iteration, array):
+        """Accumulate one iteration in memory as {iteration: array}."""
+        storage[int(iteration)] = array
+
+
+
+
+
+
+
+    @staticmethod
+    def load_frst_dict_np_elmnt(dict_np_path) : 
+        data = np.load(dict_np_path, allow_pickle=True)
+        dict = data.item()
+        elmnt = dict[0]
+        return elmnt
+
+
+
+
     @staticmethod
     def get_dummy_mask(width, height, all_true = True) :
         """

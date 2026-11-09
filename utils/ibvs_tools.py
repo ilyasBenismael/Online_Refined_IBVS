@@ -49,6 +49,7 @@ class IbvsTools :
         self.dvs_lamda = 1
 
 
+    """
     @staticmethod
     def update_cam_pose(cam_homog, Vc, dt): 
     
@@ -98,6 +99,46 @@ class IbvsTools :
         new_T[:3, 3] = t_new
         
         return new_T
+
+    """
+
+
+
+    #"""
+    @staticmethod
+    def update_cam_pose(cam_homog, Vc, dt):
+
+        T = np.asarray(cam_homog, dtype=np.float64)
+        Vc = np.asarray(Vc, dtype=np.float64).reshape(6)
+
+        v = Vc[:3]
+        w = Vc[3:]
+
+        # Twist integrated over dt
+        rho = v * dt
+        phi = w * dt
+
+        theta = np.linalg.norm(phi)
+        phi_skew = LinAlgeb.skew(phi)
+        phi_skew_squared = phi_skew @ phi_skew
+        I3 = np.eye(3)
+
+        if theta < 1e-8:
+            # Stable Taylor expansions for very small rotations
+            R_delta = I3 + phi_skew + 0.5 * phi_skew_squared
+            J = I3 + 0.5 * phi_skew + (1.0 / 6.0) * phi_skew_squared
+        else:
+            # SO(3) exponential and SE(3) translation Jacobian
+            R_delta = I3 + (np.sin(theta) / theta) * phi_skew + ((1.0 - np.cos(theta)) / theta**2) * phi_skew_squared
+            J = I3 + ((1.0 - np.cos(theta)) / theta**2) * phi_skew + ((theta - np.sin(theta)) / theta**3) * phi_skew_squared
+
+        T_delta = np.eye(4)
+        T_delta[:3, :3] = R_delta
+        T_delta[:3, 3] = J @ rho
+
+        # Right multiplication because Vc is expressed in the camera/local frame
+        return T @ T_delta
+    #"""
 
 
 
@@ -193,14 +234,22 @@ class IbvsTools :
 
 
 
-    def get_xfeat_kpts(self, img) :
-        tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
-        tensor = tensor.unsqueeze(0)  # (1,3,H,W)
-        out = self.xfeat.detectAndCompute(tensor, top_k=500)[0]
-        kpts = out['keypoints']
-        desc = out['descriptors']
-        return  kpts, desc
 
+
+    def get_xfeat_kpts(self, img, max_kpts=1000):
+        tensor = torch.from_numpy(img).permute(2, 0, 1).float()
+
+        # Normalize only if the image is in the [0, 255] range
+        if tensor.max() > 1.0:
+            tensor = tensor / 255.0
+
+        tensor = tensor.unsqueeze(0)  # (1, 3, H, W)
+        out = self.xfeat.detectAndCompute(tensor, top_k=max_kpts)[0]
+
+        kpts = out["keypoints"]
+        desc = out["descriptors"]
+
+        return kpts, desc
 
 
 
@@ -269,8 +318,7 @@ class IbvsTools :
 
     #(last_gaussians2, intrins_gs2, des_pose_gs2, des0_img, case_test_path, des0_mask, max_itrs=125)
 
-
-    def start_dvs_loop(self, last_gaussians2, intrins_gs2, des_pose_gs2, des0_img, case_test_path, mask = None, max_itrs=500) :
+    def start_dvs_loop_o3d(self, scene_o3d, mesh_handling : MeshHandling, des_pose_gs2, des0_img, case_test_path, mask = None, max_itrs=50) :
 
         try:
 
@@ -283,7 +331,80 @@ class IbvsTools :
             for i in range(max_itrs):
 
                 # 1 - Capture current img nd get S
-                cur_img, cur_depth = GaussiansHandling.render_gs_pic(*last_gaussians2, cur_pose, intrins_gs2, self.CAM_W, self.CAM_H)
+                cur_img, cur_depth = mesh_handling.render_mesh_pic([scene_o3d], cur_pose)
+
+                if mask is not None :
+                    cur_img = ImageHandling.apply_mask_on_img(cur_img, mask)
+
+                cur_img = ImageHandling.img_255_to_01(cur_img)
+                gray_cur = ImageHandling.turn_img_to_gray(cur_img)            
+                S = gray_cur.flatten()
+
+                # 2 - Compute the cost and the diff img for visua
+                diff = S - S_star
+                cost = diff.T @ diff
+                costs.append(cost)
+                print(f"Cost {i} :", cost)
+
+                # 3- Checking oscillations
+                if len(costs) >= 10:
+                    last_10 = costs[-10:]
+                    # 1. Oscillation check (if in last 10 iters we didn't improve with 5 pxls)
+                    cost_range = max(last_10) - min(last_10)
+                    stagnating = cost_range < 5
+                    # 2. Divergence
+                    first_half_mean = sum(last_10[:5]) / 5
+                    second_half_mean = sum(last_10[5:]) / 5
+                    diverging = second_half_mean > first_half_mean
+                    if stagnating :
+                        print("oscillations")
+                        return cur_pose
+                    if diverging:
+                        print("divering")
+                        return cur_pose
+                    
+
+                if (i % 5) == 0 :
+                    current_diff_img = ImageHandling.compute_grayscale_difference(gray_cur, gray_des)
+                    ImageHandling.save_img(cur_img, f"img_{i}", f"{case_test_path}/dvs_infos/DVS_frames")
+                    ImageHandling.save_img(current_diff_img, f"diff_{i}", f"{case_test_path}/dvs_infos/DVS_diffs")
+
+                # 3 - Compute Gradient and Ls 
+                grad_Ix, grad_Iy = ImageHandling.get_grads_visp(gray_cur, self.FX, self.FY)
+                Ls = self.compute_image_interaction_matrix(cur_depth, grad_Ix, grad_Iy)
+                        
+                # 4 - Compute V with GN or LM 
+                V = -self.dvs_lamda * np.linalg.solve(Ls.T @ Ls + self.dvs_mu * np.diag(np.diag(Ls.T @ Ls)), Ls.T @ diff)      
+                #V = -lamda * np.linalg.pinv(Ls) @ diff
+    
+                # 5 - Update camera pose & update matplotlib vis data
+                cur_pose = IbvsTools.update_cam_pose(cur_pose, V, self.dvs_dt)
+
+            return cur_pose
+    
+
+        except KeyboardInterrupt:
+            print("\nCtrl+C detected, exiting loop cleanly.")
+            os._exit(0)
+            return cur_pose
+
+
+
+
+    def start_dvs_loop_gs(self, gaussians, intrins_gs2, des_pose_gs2, des0_img, case_test_path, mask = None, max_itrs=50) :
+
+        try:
+
+            costs = []
+            cur_pose = des_pose_gs2
+            des_img = ImageHandling.img_255_to_01(des0_img)
+            gray_des = ImageHandling.turn_img_to_gray(des_img)
+            S_star = gray_des.flatten()
+
+            for i in range(max_itrs):
+
+                # 1 - Capture current img nd get S
+                cur_img, cur_depth = GaussiansHandling.render_gs_pic(*gaussians, cur_pose, intrins_gs2, self.CAM_W, self.CAM_H)
 
                 if mask is not None :
                     cur_img = ImageHandling.apply_mask_on_img(cur_img, mask)
@@ -347,7 +468,8 @@ class IbvsTools :
 
 
 
-    def border_safe_indices(self, kpts_img1, kpts_img2, mask1, mask2, margin=10):
+
+    def border_safe_indices(self, kpts_img1, kpts_img2, mask1, mask2, margin=10, dist1=None, dist2=None):
         """
         Return the indices of matches whose keypoints are safely inside
         the valid regions of BOTH images.
@@ -374,8 +496,10 @@ class IbvsTools :
         mask2 = np.asarray(mask2, dtype=bool)
 
         # Distance from each valid pixel to the nearest invalid region
-        dist1 = distance_transform_edt(mask1)
-        dist2 = distance_transform_edt(mask2)
+        if dist1 is None :
+            dist1 = distance_transform_edt(mask1)
+        if dist2 is None :
+            dist2 = distance_transform_edt(mask2)
 
         x1, y1 = kpts1[:, 0], kpts1[:, 1]
         x2, y2 = kpts2[:, 0], kpts2[:, 1]
@@ -396,7 +520,7 @@ class IbvsTools :
         safe2[valid2] = dist2[y2[valid2], x2[valid2]] >= margin
 
         # A match is valid only when both sides are safe
-        return safe1 & safe2
+        return (safe1 & safe2), dist1, dist2
 
 
 
@@ -500,9 +624,9 @@ class IbvsTools :
         matches_cur = np.asarray(matches_cur, dtype=np.float32)
         matches_des = np.asarray(matches_des, dtype=np.float32)
 
-        if len(matches_cur) < 8:
-            print(f"RANSAC skipped: only {len(matches_cur)} matches.")
-            return matches_cur, matches_des
+        if len(matches_cur) < 6:
+            print(f"Geometric filtering rejected: only {len(matches_cur)} matches")
+            return matches_cur[:0], matches_des[:0]
 
         F, inlier_mask = cv2.findFundamentalMat(
             matches_cur,
@@ -521,20 +645,14 @@ class IbvsTools :
         inlier_cur = matches_cur[inlier_mask]
         inlier_des = matches_des[inlier_mask]
 
-        print(
-            f"RANSAC: {len(inlier_cur)}/{len(matches_cur)} "
-            f"matches retained "
-            f"({100 * len(inlier_cur) / len(matches_cur):.1f}%)."
-        )
+        #print( f"RANSAC: {len(inlier_cur)}/{len(matches_cur)} " f"matches retained " f"({100 * len(inlier_cur) / len(matches_cur):.1f}%).")
 
         return inlier_cur, inlier_des
 
 
 
 
-
-
-    def filtered_matching(self, img1, img2, max_matches, mask1 = None, mask2 = None):
+    def filtered_matching(self, img1, img2, max_matches, mask1 = None, mask2 = None, min_cossim=0.83):
         """
         input :
         -imgs nd mask: 2d npy
@@ -550,7 +668,7 @@ class IbvsTools :
         img1_kpts, img1_desc = self.get_xfeat_kpts(img1)
         img2_kpts, img2_desc = self.get_xfeat_kpts(img2)
 
-        idxs0, idxs1 = self.xfeat.match(img2_desc, img1_desc)
+        idxs0, idxs1 = self.xfeat.match(img2_desc, img1_desc, min_cossim=min_cossim)
         matches_img2 = img2_kpts[idxs0].detach().cpu().numpy()
         matches_img1 = img1_kpts[idxs1].detach().cpu().numpy()
 
@@ -560,7 +678,7 @@ class IbvsTools :
         if mask2 is None :
             mask2 = MyUtils.get_dummy_mask(self.CAM_W, self.CAM_H)
 
-        safe_indices = self.border_safe_indices(matches_img1, matches_img2, mask1, mask2)
+        safe_indices, _, _ = self.border_safe_indices(matches_img1, matches_img2, mask1, mask2)
         
         matches_img2 = matches_img2[safe_indices]
         matches_img1 = matches_img1[safe_indices]
@@ -573,3 +691,9 @@ class IbvsTools :
         matches_img1 = matches_img1.astype(np.int32)
 
         return matches_img1, matches_img2
+
+    
+
+
+
+

@@ -2,9 +2,81 @@ import open3d as o3d
 import numpy as np
 import matplotlib.pyplot as plt
 from plyfile import PlyData, PlyElement
+from collections import deque
+import time
+import cv2
+from utils.lin_algeb import LinAlgeb
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
+from numba import njit
 
 
 
+
+
+@njit(cache=True)
+def _grow_regions_numba(normals, valid, cos_thr, min_group_size):
+    """Same BFS region growing as before, compiled. Returns label_map (H, W) int32."""
+    h, w = valid.shape
+    label_map = np.full((h, w), -1, np.int32)
+    visited = np.zeros((h, w), np.bool_)
+    queue = np.empty(h * w, np.int32)  # flat pixel indices, reused for each group
+    dys = np.array([-1, -1, -1, 0, 0, 1, 1, 1])
+    dxs = np.array([-1, 0, 1, -1, 1, -1, 0, 1])
+    n_groups = 0
+    for sy in range(h):
+        for sx in range(w):
+            if (not valid[sy, sx]) or visited[sy, sx]:
+                continue
+            visited[sy, sx] = True
+            queue[0] = sy * w + sx
+            head = 0
+            tail = 1
+            sum_x = normals[sy, sx, 0]
+            sum_y = normals[sy, sx, 1]
+            sum_z = normals[sy, sx, 2]
+            while head < tail:
+                p = queue[head]
+                head += 1
+                y = p // w
+                x = p - y * w
+                gn = np.sqrt(sum_x * sum_x + sum_y * sum_y + sum_z * sum_z)
+                if gn < 1e-12:
+                    gn = 1e-12
+                gx = sum_x / gn
+                gy = sum_y / gn
+                gz = sum_z / gn
+                cx = normals[y, x, 0]
+                cy = normals[y, x, 1]
+                cz = normals[y, x, 2]
+                for k in range(8):
+                    ny = y + dys[k]
+                    nx = x + dxs[k]
+                    if ny < 0 or ny >= h or nx < 0 or nx >= w:
+                        continue
+                    if (not valid[ny, nx]) or visited[ny, nx]:
+                        continue
+                    nnx = normals[ny, nx, 0]
+                    nny = normals[ny, nx, 1]
+                    nnz = normals[ny, nx, 2]
+                    local_sim = cx * nnx + cy * nny + cz * nnz
+                    if local_sim < cos_thr:
+                        continue
+                    group_sim = gx * nnx + gy * nny + gz * nnz
+                    if group_sim < cos_thr:
+                        continue
+                    visited[ny, nx] = True
+                    queue[tail] = ny * w + nx
+                    tail += 1
+                    sum_x += nnx
+                    sum_y += nny
+                    sum_z += nnz
+            if tail >= min_group_size:
+                for q in range(tail):
+                    pp = queue[q]
+                    label_map[pp // w, pp % w] = n_groups
+                n_groups += 1
+    return label_map
 
 
 
@@ -431,6 +503,36 @@ class MeshHandling :
 
 
 
+    @staticmethod
+    def align_points_only_z(points1, points2):
+        """
+        Estimate only the Z translation aligning corresponding 3D points.
+        Rotation, scale, X translation and Y translation remain fixed.
+        """
+
+
+        points1 = np.asarray(points1, dtype=np.float64).reshape(-1, 3)
+        points2 = np.asarray(points2, dtype=np.float64).reshape(-1, 3)
+
+        if points1.shape != points2.shape:
+            raise ValueError("source_points and target_points must have the same shape")
+
+        valid = np.isfinite(points1).all(axis=1) & np.isfinite(points2).all(axis=1)
+
+        if not valid.any():
+            raise ValueError("No valid 3D correspondences")
+
+        z_differences = points2[valid, 2] - points1[valid, 2]
+
+        # Robust against incorrect 3D correspondences
+        delta_z = np.median(z_differences)
+
+        return delta_z
+
+
+
+
+
 
     @staticmethod
     def denoise_pcd(pcd):
@@ -589,49 +691,34 @@ class MeshHandling :
 
 
 
-
-
-
     @staticmethod
     def align_clouds_icp(
         source_cloud,
         target_cloud,
         max_correspondence_distance=0.05,
         max_iterations=50,
-        voxel_size=None) :
+        voxel_size=None):
 
         """
-        Align source_points toward target_points using rigid point-to-point ICP.
-
-        Parameters
-        ----------
-        o3d_source_points : np.ndarray
-        o3d_target_points : np.ndarray
-        max_correspondence_distance : float
-            Maximum distance allowed between corresponding points.
-            Uses the same unit as the point clouds.
-        max_iterations : int
-            Maximum number of ICP iterations.
-        voxel_size : float or None
-            Downsampling voxel size. If None, no downsampling is applied.
-
-        Returns
-        -------
-        R : np.ndarray
-            Estimated rotation, shape (3, 3).
-        t : np.ndarray
-            Estimated translation, shape (3,).
-        T : np.ndarray
-            Complete rigid transformation, shape (4, 4).
+        Align source_points toward target_points using rigid point-to-plane ICP.
         """
 
-        # optio downsampling
+        # Optional downsampling
         if voxel_size is not None:
             source_icp = source_cloud.voxel_down_sample(voxel_size)
             target_icp = target_cloud.voxel_down_sample(voxel_size)
         else:
             source_icp = source_cloud
             target_icp = target_cloud
+
+        # 1. CRITICAL: Estimate normals for Point-to-Plane
+        # Set search radius proportional to voxel size (or ~0.1m if no voxelization)
+        normal_radius = voxel_size * 3 if voxel_size else 0.1
+        
+        source_icp.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
+        
+        target_icp.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
+        
 
         # Clouds are already approximately aligned, so start from identity
         T_initial = np.eye(4)
@@ -641,12 +728,13 @@ class MeshHandling :
             target_icp,
             max_correspondence_distance,
             T_initial,
-            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            # 2. SWITCHED FROM PointToPoint TO PointToPlane
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
             o3d.pipelines.registration.ICPConvergenceCriteria(
                 relative_fitness=1e-6,
                 relative_rmse=1e-6,
                 max_iteration=max_iterations))
-
+        
         T = result.transformation
         R = T[:3, :3]
         t = T[:3, 3]
@@ -812,13 +900,446 @@ class MeshHandling :
 
 
 
+
+
+
+
+
+
+
+    def render_planar_structure_imgs(self, points, organized_subsurfaces, cam_pose = None, color_variation=0.10, visualize=False):
+        """
+        Render the planar surfaces and their sub-surfaces.
+
+        Main surfaces receive different colors. Sub-surfaces preserve their
+        parent surface color with a slight brightness variation.
+
+        Returns
+        -------
+        surfaces_img : np.ndarray
+            Rendered main planar surfaces.
+
+        subsurfaces_img : np.ndarray
+            Rendered planar sub-surfaces.
+        """
+
+        points_flat = np.asarray(points).reshape(-1, 3)
+        rng = np.random.default_rng(0)
+
+        if cam_pose is None:
+            cam_pose = LinAlgeb.get_eye_matrix(4)
+
+        surface_points, surface_colors = [], []
+        subsurface_points, subsurface_colors = [], []
+
+        for surface in organized_subsurfaces:
+            # Give every main surface a different base color
+            base_color = rng.uniform(0.2, 0.9, size=3)
+            surface_indices = surface["indices"]
+
+            surface_points.append(points_flat[surface_indices])
+            surface_colors.append(np.tile(base_color, (len(surface_indices), 1)))
+
+            # Give sub-surfaces slight variations of their parent color
+            for subsurface in surface["subsurfaces"]:
+                subsurface_indices = subsurface["indices"]
+                subsurface_id = subsurface["subsurface_id"]
+
+                variation = color_variation * np.sin((subsurface_id + 1) * 2.4)
+                color = np.clip(base_color * (1.0 + variation), 0.0, 1.0)
+
+                subsurface_points.append(points_flat[subsurface_indices])
+                subsurface_colors.append(np.tile(color, (len(subsurface_indices), 1)))
+
+        # Create the main-surface point cloud
+        surface_points = np.concatenate(surface_points, axis=0)
+        surface_colors = np.concatenate(surface_colors, axis=0)
+        surfaces_o3d = self.turn_points_to_o3d(surface_points, surface_colors)
+
+        # Create the sub-surface point cloud
+        subsurface_points = np.concatenate(subsurface_points, axis=0)
+        subsurface_colors = np.concatenate(subsurface_colors, axis=0)
+        subsurfaces_o3d = self.turn_points_to_o3d(subsurface_points, subsurface_colors)
+
+        # Render both point clouds from the original MoGe camera
+        surfaces_img, _ = self.render_mesh_pic([surfaces_o3d], cam_pose)
+        subsurfaces_img, _ = self.render_mesh_pic([subsurfaces_o3d], cam_pose)
+
+        if(visualize) :
+            MeshHandling.visualize_scene([surfaces_o3d])
+
+        if(visualize) :
+            MeshHandling.visualize_scene([subsurfaces_o3d])
+
+        return surfaces_img, subsurfaces_img
     
 
 
 
 
 
+
+
+
+
+    @staticmethod
+    def get_subsurface_centers_and_colors(points, colors, organized_subsurfaces):
+        """
+        Calculate one XYZ center and one average RGB color for every sub-surface.
+
+        The rows correspond:
+            centers_xyz[i] belongs to centers_rgb[i]
+        """
+
+        points_flat = np.asarray(points).reshape(-1, 3)
+        colors_flat = np.asarray(colors).reshape(-1, 3)
+
+        centers_xyz = []
+        centers_rgb = []
+
+        for surface in organized_subsurfaces:
+            for subsurface in surface["subsurfaces"]:
+                indices = subsurface["indices"]
+
+                # Center and average color of the sub-surface
+                center_xyz = np.mean(points_flat[indices], axis=0)
+                center_rgb = np.mean(colors_flat[indices], axis=0)
+
+                centers_xyz.append(center_xyz)
+                centers_rgb.append(center_rgb)
+
+        return np.asarray(centers_xyz), np.asarray(centers_rgb)
     
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+    def group_points_by_normals(points, normals, valid_mask, theta_max_deg=12.0, min_group_size=40):
+        """
+        Group image-organized 3D points into connected regions with similar normals.
+
+        Parameters
+        ----------
+        all points : np.ndarray, shape (H, W, 3)
+
+        normals : np.ndarray, shape (H, W, 3)
+
+        valid_mask : np.ndarray, shape (H, W)
+
+        theta_max_deg : float
+            Maximum accepted normal-angle difference.
+
+        min_group_size : int
+            Groups smaller than this are discarded.
+
+        Returns
+        -------
+        normal_groups : list[np.ndarray]
+            a list of sub-lists (each sub-list contains flattened_indices of points belonging to same surface)
+
+        label_map : np.ndarray, shape (H, W)
+            H,W where the corresp img indexe gives the group_id it belongs to
+        """
+
+        points = np.asarray(points)
+        normals = np.asarray(normals, dtype=np.float64)
+        valid = np.asarray(valid_mask, dtype=bool).copy()
+        h, w = valid.shape
+
+        # Remove invalid 3D points and normals
+        normal_norms = np.linalg.norm(normals, axis=2)
+        valid &= np.isfinite(points).all(axis=2)
+        valid &= np.isfinite(normals).all(axis=2)
+        valid &= normal_norms > 1e-8
+
+        # Ensure unit normals (and zero out the bad ones so no NaNs go in the compiled function)
+        normals = normals / np.maximum(normal_norms[..., None], 1e-8)
+        normals = np.ascontiguousarray(np.where(valid[..., None], normals, 0.0))
+        cosine_threshold = float(np.cos(np.deg2rad(theta_max_deg)))
+
+        # The fast compiled (numba) region growing does the old pixel by pixel BFS:
+        # for each valid pixel we check its 8 neighbours, their normals' cosine sim with the pixel normal,
+        # and with the group's average normal (prevents gradual normal drift across curved surfaces).
+        # It gives every pixel a group id (-1 = no group)
+        label_map = _grow_regions_numba(normals, np.ascontiguousarray(valid), cosine_threshold, int(min_group_size))
+
+        # Turn the label map into one list of flattened indices per group
+        # flat_index = y * w + x  (a single unique number for each pixel), for example with width = 4 :
+        # (0,0) -> 0 | (0,1) -> 1 | (1,0) -> 4 | (1,1) -> 5
+        # and it can be converted back by : y = flat_index // w , x = flat_index % w
+        flat_labels = label_map.ravel()
+        idx = np.flatnonzero(flat_labels >= 0)
+        if idx.size == 0:
+            return [], label_map
+
+        lab = flat_labels[idx]
+        order = np.argsort(lab, kind="stable")      # sort the pixels by group id
+        idx, lab = idx[order], lab[order]
+        cuts = np.cumsum(np.bincount(lab))[:-1]     # where each group ends
+        groups = np.split(idx, cuts)                # first group = 0, second = 1, third = 2 ...
+
+        return groups, label_map
+
+
+
+
+
+
+
+
+
+    @staticmethod
+    def organize_planar_subsurfaces(points, label_map, max_side_pixels=50, min_subsurface_pixels=10):
+        """
+        -takes all 3d points + the label_map (H,W each value is the group id it belogs to)
+        -find the 2d bbx of that planar surface divide it to 2d tiles of max_side_pixels(square)
+        -organize these points to the ones belonging to same tile on same planar srface => sub-surface points
+        -discard a subsurface if it's too small (less than min_subsurface_pixels)
+
+        Returns
+        -------
+        sub_surfaces : list[dict]
+            --list of dict where each dict got a :
+            "surface_id" (the mother one), its "bounding_box", "pixel_yx" (a np list of (y,x) indices of pixels of that surface), then the "subsurfaces"
+            --surface["subsurfaces"] got a "subsurface_id", "indices" (the flattened indices), "pixel_yx" (np list of (y,x) indices of pxls of that subsrfce), "tiles" (its tile bbx)
+        """
+
+        points = np.asarray(points)
+        label_map = np.asarray(label_map)
+        h, w = label_map.shape
+
+        if points.shape[:2] != (h, w):
+            raise ValueError("points and label_map must have the same height and width")
+
+        S = int(max_side_pixels)
+
+        # all the pixels that belong to some surface (raster order)
+        ys, xs = np.nonzero(label_map >= 0)
+        if ys.size == 0:
+            return []
+        ys = ys.astype(np.int64)
+        xs = xs.astype(np.int64)
+        flat = ys * w + xs
+        lab = label_map[ys, xs]
+
+        # sort the pixels by surface, and get each surface's bounding box
+        uniq, inv = np.unique(lab, return_inverse=True)
+        n_surf = len(uniq)
+        order = np.argsort(inv, kind="stable")
+        counts = np.bincount(inv, minlength=n_surf)
+        starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+
+        ys_s, xs_s = ys[order], xs[order]
+        min_y = np.minimum.reduceat(ys_s, starts)
+        max_y = np.maximum.reduceat(ys_s, starts)
+        min_x = np.minimum.reduceat(xs_s, starts)
+        max_x = np.maximum.reduceat(xs_s, starts)
+
+        # cut each surface's box into square tiles of max_side_pixels, and find the tile of every pixel
+        n_tx = (max_x - min_x) // S + 1
+        n_ty = (max_y - min_y) // S + 1
+        ty = (ys - min_y[inv]) // S
+        tx = (xs - min_x[inv]) // S
+        tile_id = ty * n_tx[inv] + tx
+        tiles_per_surface = int((n_tx * n_ty).max())
+
+        # one key per pixel = (which surface, which tile)
+        key = np.full((h, w), -1, dtype=np.int64)
+        key[ys, xs] = inv.astype(np.int64) * tiles_per_surface + tile_id
+
+        # A tile might contain several disconnected pieces,
+        # so we link neighbor pixels (left-right and up-down) only if they have the same key
+        node = np.arange(h * w, dtype=np.int64).reshape(h, w)
+        rows, cols = [], []
+
+        a, b = key[:, :-1], key[:, 1:]
+        m = (a >= 0) & (a == b)
+        rows.append(node[:, :-1][m]); cols.append(node[:, 1:][m])
+
+        a, b = key[:-1, :], key[1:, :]
+        m = (a >= 0) & (a == b)
+        rows.append(node[:-1, :][m]); cols.append(node[1:, :][m])
+
+        rows = np.concatenate(rows)
+        cols = np.concatenate(cols)
+        graph = coo_matrix((np.ones(rows.size, dtype=np.uint8), (rows, cols)), shape=(h * w, h * w))
+
+        # connected pieces = the sub-surfaces
+        _, comp = connected_components(graph, directed=False)
+
+        # sort the pixels by piece
+        comp_v = comp[flat]
+        o2 = np.argsort(comp_v, kind="stable")
+        comp_sorted = comp_v[o2]
+        flat_sorted = flat[o2]
+        ys2, xs2 = ys[o2], xs[o2]
+        inv2 = inv[o2]
+        tile2 = tile_id[o2]
+
+        # find where each piece starts and ends
+        c_starts = np.flatnonzero(np.concatenate(([True], comp_sorted[1:] != comp_sorted[:-1])))
+        c_ends = np.concatenate((c_starts[1:], [comp_sorted.size]))
+        c_sizes = c_ends - c_starts
+
+        # discard a subsurface if it's too small
+        keep = c_sizes >= min_subsurface_pixels
+        c_starts, c_ends = c_starts[keep], c_ends[keep]
+
+        # order the pieces by surface, then tile, then first pixel
+        c_surf = inv2[c_starts]
+        c_tile = tile2[c_starts]
+        c_first = flat_sorted[c_starts]
+        c_order = np.lexsort((c_first, c_tile, c_surf))
+        c_starts, c_ends, c_surf, c_tile = c_starts[c_order], c_ends[c_order], c_surf[c_order], c_tile[c_order]
+
+        # build the surfaces list (the mother surfaces)
+        surfaces = []
+        for s in range(n_surf):
+            sl = slice(starts[s], starts[s] + counts[s])
+            sy, sx = ys_s[sl], xs_s[sl]
+            surfaces.append({
+                "surface_id": int(uniq[s]),
+                "indices": sy * w + sx,
+                "pixel_yx": np.column_stack((sy, sx)),
+                "bounding_box": (int(min_y[s]), int(min_x[s]), int(max_y[s]), int(max_x[s])),
+                "subsurfaces": []
+            })
+
+        # put each piece inside its mother surface
+        for st, en, s, t in zip(c_starts, c_ends, c_surf, c_tile):
+            s = int(s)
+            t = int(t)
+            ty_i, tx_i = divmod(t, int(n_tx[s]))
+            y0 = int(min_y[s]) + ty_i * S
+            x0 = int(min_x[s]) + tx_i * S
+            y1 = min(y0 + S, int(max_y[s]) + 1)
+            x1 = min(x0 + S, int(max_x[s]) + 1)
+
+            py, px = ys2[st:en], xs2[st:en]
+            subs = surfaces[s]["subsurfaces"]
+            subs.append({
+                "subsurface_id": len(subs),
+                "indices": py * w + px,
+                "pixel_yx": np.column_stack((py, px)),
+                "tile": (y0, x0, y1, x1)
+            })
+
+        return surfaces
+
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+    def get_valid_match_indices(coords_2d, mask):
+        """
+        takes a 2d coords list and a 2d boolean mask of the img and filters and returns just the indices of the valid 2d coords list
+        """
+        coords = np.asarray(coords_2d, dtype=float).reshape(-1, 2)
+        mask = np.asarray(mask, dtype=bool)
+
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        safe_mask = cv2.erode(
+            mask.astype(np.uint8),
+            kernel,
+            borderType=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ).astype(bool)
+
+        finite = np.isfinite(coords).all(axis=1)
+        xy = np.zeros(coords.shape, dtype=int)
+        xy[finite] = np.rint(coords[finite]).astype(int)
+        x, y = xy[:, 0], xy[:, 1]
+
+        h, w = mask.shape
+        inside = finite & (x >= 0) & (x < w) & (y >= 0) & (y < h)
+
+        valid = np.zeros(len(coords), dtype=bool)
+        valid[inside] = safe_mask[y[inside], x[inside]]
+
+        return np.flatnonzero(valid).tolist()
+    
+
+
+
+
+
+
+
+    @staticmethod
+    def estimate_and_apply_z_offset(cloud1, cloud2, cloud2_full, pose2_ofthecamcloud):
+        """
+        -Takes cloud1 cloud2 corresp 3d points in world frame
+        -get the delta_Z to apply to cloud2 to best fit cloud1
+        -Return delta_z_in in camframe of img2 and return also the full updated cloud2 in world frame
+        """
+        
+        cloud1 = np.asarray(cloud1, dtype=np.float64).reshape(-1, 3)
+        cloud2 = np.asarray(cloud2, dtype=np.float64).reshape(-1, 3)
+        cloud2_full = np.asarray(cloud2_full, dtype=np.float64)
+        full_shape = cloud2_full.shape
+        cloud2_full_flat = cloud2_full.reshape(-1, 3).copy()
+        pose2_ofthecamcloud = np.asarray(pose2_ofthecamcloud, dtype=np.float64)
+        T_cw_2 = np.linalg.inv(pose2_ofthecamcloud)
+
+        if len(cloud1) != len(cloud2):
+            raise ValueError("cloud1 and cloud2 must contain corresponding 3D points.")
+
+        # Compare the matched world points in KF2's camera frame.
+        cloud1_cam2 = LinAlgeb.transform_points_to_world(cloud1, T_cw_2)
+        cloud2_cam2 = LinAlgeb.transform_points_to_world(cloud2, T_cw_2)
+        z1 = cloud1_cam2[:, 2]
+        z2 = cloud2_cam2[:, 2]
+        valid_matches = np.isfinite(z1) & np.isfinite(z2)
+        if np.count_nonzero(valid_matches) < 8:
+            raise ValueError(f"Not enough valid 3D matches for Z correction: {np.count_nonzero(valid_matches)}")
+        delta_z = float(np.median(z1[valid_matches] - z2[valid_matches]))
+
+        # Apply the offset to the full cloud in KF2's camera frame, along each camera ray.
+        valid_cloud = np.isfinite(cloud2_full_flat).all(axis=1)     
+        valid_indices = np.flatnonzero(valid_cloud)
+        cloud2_full_cam2 = LinAlgeb.transform_points_to_world(cloud2_full_flat[valid_indices], T_cw_2)
+        z_old = cloud2_full_cam2[:, 2]
+        z_new = z_old + delta_z
+        can_correct = np.isfinite(z_new) & (np.abs(z_old) > 1e-6) & (z_old * z_new > 0)
+        ray_scale = np.ones_like(z_old)
+        ray_scale[can_correct] = z_new[can_correct] / z_old[can_correct]
+        cloud2_full_cam2[can_correct] *= ray_scale[can_correct, None]
+
+        # Return the corrected dense cloud in world coordinates.
+        corrected_world = LinAlgeb.transform_points_to_world(cloud2_full_cam2, pose2_ofthecamcloud)
+        cloud2_after_offset = cloud2_full_flat.copy()
+        cloud2_after_offset[valid_indices] = corrected_world
+        return cloud2_after_offset.reshape(full_shape), delta_z
+    
+
+
+
+
+
+
+
+
 
 
 

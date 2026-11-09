@@ -66,14 +66,19 @@ from modules.xfeat import XFeat
 
 def main() :
 
-    #__________
-    #loop on the moge imgs 
-    #_______
 
+
+
+    # testing normals given by moge
+    
+    
+    return
+
+
+   
     #sfm_path = "/home/user/Bureau/ilyas/3d_art/essaouira_room/sfm"
     #GaussiansHandling.run_gs_training(sfm_path=sfm_path, output_path= f"/home/user/Bureau/visual_navigation/", gs_reso = 2, gs_nbr_itrs = 15000)
-    
-    
+     
 
     # Load sfm infos
     sfm_path = "/home/user/Bureau/ilyas/3d_art/essaouira_room/sfm"

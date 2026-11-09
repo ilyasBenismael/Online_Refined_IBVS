@@ -6,7 +6,12 @@ import os
 import pycolmap
 import shutil
 import heapq
+import cv2
 from pathlib import Path
+import torch
+import torch.nn.functional as F
+from gsplat import rasterization
+from utils.gaussians_handling import GaussiansHandling
 
 
 
@@ -418,6 +423,16 @@ class PosesHandling :
 
 
     @staticmethod
+    def get_intrins_gs(gs_sfm_path):
+        recons = PosesHandling.get_recons(gs_sfm_path)
+        K = PosesHandling.get_cam_matrix(recons)
+        intrins_gs = GaussiansHandling.turn_cam_matrix_to_gsplat_format(K)
+        return intrins_gs
+
+
+
+
+    @staticmethod
     def make_colmap_data(sparse_path, img_ids, img_names, poses, W, H, fx, fy, cx=None, cy=None) :
 
         if cx is None :
@@ -476,4 +491,376 @@ class PosesHandling :
 
             # line 2 blank for 2d points
             MyUtils.add_line_to_text(txt_file, "")
+
+
+
+
+
+
+    @staticmethod
+    def estimate_pose_pnp_ransac(
+        points_3d_i0,
+        pixels_kf1,
+        K,
+        dist_coeffs=None,
+        iterations=1000,
+        reprojection_error_px=3.0,
+        confidence=0.99, min_inliers=6):
+        """
+        Estimate the transform from the initial camera frame to KF1.
+
+        points_3d_i0: (N, 3) 3D points in I0's camera frame
+        pixels_kf1:   (N, 2) corresponding matched pixels in KF1
+        K:            (3, 3) intrinsics for the KF1 image
+        dist_coeffs:  distortion coefficients, or None for undistorted images
+
+        Returns:
+            R:             (3, 3) rotation
+            t:             (3, 1) translation
+            inlier_indices: indices into the original input arrays
+        """
+        points_3d_i0 = np.asarray(points_3d_i0, dtype=np.float64).reshape(-1, 3)
+        pixels_kf1 = np.asarray(pixels_kf1, dtype=np.float64).reshape(-1, 2)
+        K = np.asarray(K, dtype=np.float64)
+
+        if len(points_3d_i0) != len(pixels_kf1):
+            raise ValueError("Each 3D point must have one corresponding KF1 pixel.")
+        if K.shape != (3, 3):
+            raise ValueError("K must have shape (3, 3).")
+
+        # Remove invalid pairs, while retaining their original indices.
+        valid = (
+            np.isfinite(points_3d_i0).all(axis=1)
+            & np.isfinite(pixels_kf1).all(axis=1)
+        )
+        original_indices = np.flatnonzero(valid)
+        X = np.ascontiguousarray(points_3d_i0[valid])
+        uv = np.ascontiguousarray(pixels_kf1[valid])
+
+        if len(X) < 4:
+            raise ValueError("PnP-RANSAC needs at least 4 valid 3D–2D pairs.")
+
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
+            objectPoints=X,
+            imagePoints=uv,
+            cameraMatrix=K,
+            distCoeffs=dist_coeffs,
+            iterationsCount=iterations,
+            reprojectionError=reprojection_error_px,
+            confidence=confidence,
+            flags=cv2.SOLVEPNP_EPNP,
+        )
+
+        if not success or inliers is None:
+            raise RuntimeError("PnP-RANSAC could not estimate a pose.")
+
+        inlier_indices = original_indices[inliers.reshape(-1)]
+        if len(inlier_indices) < min_inliers:
+            raise RuntimeError(
+                f"Too few PnP inliers: {len(inlier_indices)} "
+                f"(minimum required: {min_inliers})."
+            )
+
+        R, _ = cv2.Rodrigues(rvec)
+
+        if inlier_indices is None or len(inlier_indices) < 6:
+                        raise ValueError(f"PnP failed ! not enough inliers")
+
+        return R, tvec.reshape(3, 1), inlier_indices
+
+
+    @staticmethod
+    def refine_pose_pnp(
+        points_3d_i0,
+        pixels_kf1,
+        K,
+        R,
+        t,
+        inlier_indices,
+        dist_coeffs=None):
+        """
+        Refine an initial PnP pose using its RANSAC inliers.
+
+        Returns:
+            R_refined: (3, 3) refined rotation
+            t_refined: (3, 1) refined translation
+        """
+        points_3d_i0 = np.asarray(points_3d_i0, dtype=np.float64).reshape(-1, 3)
+        pixels_kf1 = np.asarray(pixels_kf1, dtype=np.float64).reshape(-1, 2)
+        K = np.asarray(K, dtype=np.float64)
+
+        idx = np.asarray(inlier_indices, dtype=np.int64).reshape(-1)
+        if len(idx) < 4:
+            raise ValueError("At least 4 inliers are required for refinement.")
+        if np.any(idx < 0) or np.any(idx >= len(points_3d_i0)):
+            raise ValueError("An inlier index is outside the input arrays.")
+
+        X = np.ascontiguousarray(points_3d_i0[idx])
+        uv = np.ascontiguousarray(pixels_kf1[idx])
+
+        if not (np.isfinite(X).all() and np.isfinite(uv).all()):
+            raise ValueError("The selected inlier pairs contain invalid values.")
+
+        rvec, _ = cv2.Rodrigues(np.asarray(R, dtype=np.float64))
+        tvec = np.asarray(t, dtype=np.float64).reshape(3, 1).copy()
+
+        rvec_refined, tvec_refined = cv2.solvePnPRefineLM(
+            objectPoints=X,
+            imagePoints=uv,
+            cameraMatrix=K,
+            distCoeffs=dist_coeffs,
+            rvec=rvec,
+            tvec=tvec)
+
+        R_refined, _ = cv2.Rodrigues(rvec_refined)
+        return R_refined, tvec_refined.reshape(3, 1)
+
+
+
+
+
+
+
+
+    @staticmethod
+    def rotation_6d_to_matrix(rotation_6d):
+        # Split the six values into two 3D vectors.
+        first = rotation_6d[..., :3]
+        second = rotation_6d[..., 3:]
+
+        # Normalize the first vector.
+        axis_1 = F.normalize(first, dim=-1)
+
+        # Remove the part of the second vector parallel to the first.
+        # This makes the vectors perpendicular.
+        second = second - (axis_1 * second).sum(dim=-1, keepdim=True) * axis_1
+
+        # Normalize the second vector and create the third axis.
+        axis_2 = F.normalize(second, dim=-1)
+        axis_3 = torch.cross(axis_1, axis_2, dim=-1)
+
+        # Stack the three axes into a valid 3x3 rotation matrix.
+        return torch.stack((axis_1, axis_2, axis_3), dim=-2)
+
+
+
+
+
+    @staticmethod
+    def optimize_keyframe_pose(
+        initial_pose_np,
+        frame,
+        gaussians,
+        K,
+        W,
+        H,
+        raster_mode="classic",
+        iterations=100,
+        learning_rate=1e-4,
+        ssim_weight=0.2,
+        frame_mask=None,
+        downscale_levels=None,
+        downscale=1,
+    ):
+        """Refine a camera-to-world pose against a fixed 3DGS using L1 + SSIM."""
+        import torch
+        import torch.nn.functional as F
+
+        means, quats, scales, opacities, sh = gaussians
+        device = means.device
+        dtype = torch.float32
+
+        initial_pose = torch.as_tensor(initial_pose_np, device=device, dtype=dtype).detach().clone().unsqueeze(0)
+
+        frame_tensor = torch.as_tensor(frame, device=device)
+        frame_tensor = frame_tensor.float() / 255.0 if frame_tensor.dtype == torch.uint8 else frame_tensor.float()
+        frame_tensor = frame_tensor.detach().clone().permute(2, 0, 1).unsqueeze(0).contiguous()
+
+        K = torch.as_tensor(K, device=device, dtype=dtype).detach().clone().reshape(1, 3, 3)
+
+        mask_full = None
+        if frame_mask is not None:
+            mask_full = torch.as_tensor(frame_mask, device=device, dtype=dtype).detach().clone()[None, None]
+
+        means = means.detach().to(device=device, dtype=dtype).clone()
+        quats = quats.detach().to(device=device, dtype=dtype).clone()
+        scales = scales.detach().to(device=device, dtype=dtype).clone()
+        opacities = opacities.detach().to(device=device, dtype=dtype).clone().reshape(-1)
+        sh = sh[:, :1].detach().to(device=device, dtype=dtype).clone().contiguous()
+
+        levels = (
+            [(1.0 / float(downscale), int(iterations))]
+            if downscale_levels is None
+            else [(float(scale), int(n_iters)) for scale, n_iters in downscale_levels]
+        )
+        total_iterations = sum(n_iters for _, n_iters in levels)
+
+        print("\n========== KEYFRAME POSE OPTIMIZATION ==========")
+        print(f"Device: {device} | Gaussians: {means.shape[0]} | Image: {W}x{H}")
+        print(f"Iterations: {total_iterations} | Learning rate: {learning_rate} | SSIM weight: {ssim_weight}")
+        if mask_full is not None:
+            print(f"Valid mask pixels: {100.0 * mask_full.mean().item():.2f}%")
+
+        pose_delta = torch.nn.Parameter(torch.zeros(1, 9, device=device, dtype=dtype))
+        identity_rotation_6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], device=device, dtype=dtype)
+        bottom_row = torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], device=device, dtype=dtype)
+        optimizer = torch.optim.Adam([pose_delta], lr=learning_rate, weight_decay=1e-6)
+
+        def current_c2w():
+            rotation = PosesHandling.rotation_6d_to_matrix(pose_delta[:, 3:] + identity_rotation_6d)
+            top = torch.cat([rotation, pose_delta[:, :3].unsqueeze(-1)], dim=2)
+            correction = torch.cat([top, bottom_row], dim=1)
+            return initial_pose @ correction
+
+        # Same 2D Gaussian window as in optimize_poses_gaussians.
+        window_size, sigma = 11, 1.5
+        pad = window_size // 2
+        coords = torch.arange(window_size, device=device, dtype=dtype)
+        kernel_1d = torch.exp(-((coords - pad) ** 2) / (2.0 * sigma ** 2))
+        kernel_1d = kernel_1d / kernel_1d.sum()
+        kernel_2d = torch.outer(kernel_1d, kernel_1d)
+        ssim_window = kernel_2d.reshape(1, 1, window_size, window_size).expand(3, 1, window_size, window_size).contiguous()
+
+        def prepare_level(scale):
+            height = max(1, int(round(H * scale)))
+            width = max(1, int(round(W * scale)))
+            target, mask = frame_tensor, mask_full
+
+            if (height, width) != (H, W):
+                target = F.interpolate(frame_tensor, size=(height, width), mode="area")
+                if mask_full is not None:
+                    mask = (F.interpolate(mask_full, size=(height, width), mode="area") >= 0.5).to(dtype)
+
+            K_level = K.clone()
+            K_level[:, 0, :] *= width / W
+            K_level[:, 1, :] *= height / H
+
+            mask_sum = valid_weights = None
+            if mask is not None:
+                if not mask.any().item():
+                    raise ValueError(f"frame_mask has no valid pixels at scale {scale}.")
+                mask_sum = mask.sum()
+                valid_weights = F.conv2d(mask, ssim_window[:1], padding=pad).clamp_min(1e-8)
+
+            return {
+                "H": height,
+                "W": width,
+                "K": K_level,
+                "target": target,
+                "mask": mask,
+                "mask_sum": mask_sum,
+                "valid_weights": valid_weights,
+            }
+
+        def calculate_ssim_loss(predicted, target, level):
+            mask = level["mask"]
+
+            if mask is None:
+                mu1 = F.conv2d(predicted, ssim_window, padding=pad, groups=3)
+                mu2 = F.conv2d(target, ssim_window, padding=pad, groups=3)
+
+                mu1_sq = mu1 * mu1
+                mu2_sq = mu2 * mu2
+                mu1_mu2 = mu1 * mu2
+
+                sigma1_sq = F.conv2d(predicted * predicted, ssim_window, padding=pad, groups=3) - mu1_sq
+                sigma2_sq = F.conv2d(target * target, ssim_window, padding=pad, groups=3) - mu2_sq
+                sigma12 = F.conv2d(predicted * target, ssim_window, padding=pad, groups=3) - mu1_mu2
+            else:
+                # Exclude invalid pixels from the local SSIM statistics.
+                valid_weights = level["valid_weights"]
+                mu1 = F.conv2d(predicted * mask, ssim_window, padding=pad, groups=3) / valid_weights
+                mu2 = F.conv2d(target * mask, ssim_window, padding=pad, groups=3) / valid_weights
+
+                mu1_sq = mu1 * mu1
+                mu2_sq = mu2 * mu2
+                mu1_mu2 = mu1 * mu2
+
+                sigma1_sq = F.conv2d(predicted * predicted * mask, ssim_window, padding=pad, groups=3) / valid_weights - mu1_sq
+                sigma2_sq = F.conv2d(target * target * mask, ssim_window, padding=pad, groups=3) / valid_weights - mu2_sq
+                sigma12 = F.conv2d(predicted * target * mask, ssim_window, padding=pad, groups=3) / valid_weights - mu1_mu2
+
+            c1, c2 = 0.01 ** 2, 0.03 ** 2
+            ssim_map = (
+                ((2.0 * mu1_mu2 + c1) * (2.0 * sigma12 + c2))
+                / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
+            )
+
+            if mask is None:
+                return 1.0 - ssim_map.mean()
+
+            return 1.0 - (ssim_map * mask).sum() / (3.0 * level["mask_sum"])
+
+        loss_tensors = []
+        global_step = 0
+
+        for level_index, (scale, n_iters) in enumerate(levels):
+            level = prepare_level(scale)
+            target, mask = level["target"], level["mask"]
+
+            print(f"\nLevel {level_index + 1}/{len(levels)} | Resolution: {level['W']}x{level['H']} | Iterations: {n_iters}")
+
+            for _ in range(n_iters):
+                optimizer.zero_grad(set_to_none=True)
+
+                candidate_c2w = current_c2w()
+                viewmat = GaussiansHandling.get_gs_viewmat(candidate_c2w[0])
+                viewmat = viewmat.to(device=device, dtype=dtype).reshape(1, 4, 4)
+
+                rendered, _, _ = rasterization(
+                    means=means,
+                    quats=quats,
+                    scales=scales,
+                    opacities=opacities,
+                    colors=sh,
+                    viewmats=viewmat,
+                    Ks=level["K"],
+                    width=level["W"],
+                    height=level["H"],
+                    sh_degree=0,
+                    rasterize_mode=raster_mode,
+                    render_mode="RGB",
+                )
+
+                rendered = rendered.permute(0, 3, 1, 2).contiguous()
+
+                if mask is None:
+                    l1 = F.l1_loss(rendered, target)
+                else:
+                    l1 = ((rendered - target).abs() * mask).sum() / (3.0 * level["mask_sum"])
+
+                ssim_loss = calculate_ssim_loss(rendered, target, level)
+                loss = torch.lerp(l1, ssim_loss, ssim_weight)
+
+                loss.backward()
+                optimizer.step()
+                loss_tensors.append(loss.detach())
+                global_step += 1
+
+                # Read all three loss values together for logging.
+                loss_value, l1_value, ssim_value = torch.stack([loss.detach(), l1.detach(), ssim_loss.detach()]).cpu().tolist()
+                print(f"Iteration {global_step:03d}/{total_iterations} | Loss: {loss_value:.6f} | L1: {l1_value:.6f} | SSIM loss: {ssim_value:.6f}")
+
+        with torch.no_grad():
+            final_c2w = current_c2w()
+            refined_pose = final_c2w[0].cpu().numpy()
+            loss_history = torch.stack(loss_tensors).cpu().tolist() if loss_tensors else []
+
+            rotation = PosesHandling.rotation_6d_to_matrix(pose_delta[:, 3:] + identity_rotation_6d)[0]
+            rotation_cos = ((rotation.trace() - 1.0) / 2.0).clamp(-1.0, 1.0)
+            rotation_change = torch.rad2deg(torch.acos(rotation_cos)).item()
+            translation_change = (final_c2w[0, :3, 3] - initial_pose[0, :3, 3]).norm().item()
+
+        print("\n========== POSE OPTIMIZATION FINISHED ==========")
+        print(f"Pose change: translation={translation_change:.6f} scene units | rotation={rotation_change:.4f} degrees")
+        print(f"Iterations completed: {len(loss_history)}")
+
+        return refined_pose, loss_history
+
+    
+
+
+
+
+
 

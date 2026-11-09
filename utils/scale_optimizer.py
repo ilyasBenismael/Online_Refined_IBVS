@@ -40,18 +40,8 @@ class ScaleOptimizer :
         self.REFINEMENT_FACTOR = REFINEMENT_FACTOR
         self.SCALE_THRESHOLD = SCALE_THRESHOLD
 
-        self.render_save_path = f"{case_test_path}/scales_test/renders"
-        self.diff_save_path = f"{case_test_path}/scales_test/diffs"
-        self.plot_save_path = f"{case_test_path}/scales_test/plots"
-        os.makedirs(self.render_save_path, exist_ok=True)
-        os.makedirs(self.diff_save_path, exist_ok=True)
-        os.makedirs(self.plot_save_path, exist_ok=True)
-
-
         # Cache: scale -> photometric error
         self.cache = {}
-
-
 
         # Fixed axis limits, set on first plot call and only ever widened -------------------------------------------------
         self._y_min = None
@@ -491,8 +481,8 @@ class ScaleOptimizer :
         s
         """
         # get the matches (init & kf)
-        matches_init, matches_kf = ibvs_tools.filtered_matching(init_img, keyframe, init_moge_mask, nbr_kpts)
-        img_mtch = ImageHandling.draw_matches(matches_init, matches_kf, init_img, keyframe)
+        matches_init, matches_kf = ibvs_tools.filtered_matching(init_img, keyframe, nbr_kpts, mask1=init_moge_mask)
+        #img_mtch = ImageHandling.draw_matches(matches_init, matches_kf, init_img, keyframe)
         #ImageHandling.plot_img(img_mtch)
 
         # get corresp 3d points
